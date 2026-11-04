@@ -30,6 +30,11 @@ export interface SyncRunnerDeps {
 
 export const NO_KEY_STATUS = "No API key on this device";
 
+function splitCandidate(candidate: string): [string, string] {
+  const split = candidate.indexOf("\n");
+  return [candidate.slice(0, split), candidate.slice(split + 1)];
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -42,7 +47,9 @@ export class SyncRunner {
   private refusedKeys = new Map<string, string>(); // urlKey → the API key Linear refused
   private rateLimitedUntil = new Map<string, number>();
   private labelIds = new Map<string, string>(); // "<urlKey>\n<label name>" → label id
-  private removalCandidates = new Map<string, number>(); // ticket key → first seen
+  // "<add|remove>\n<ticket key>" → when a pass first awaited that change
+  private candidates = new Map<string, number>();
+  private stopped = false;
   private now: () => number;
   private confirmDelayMs: number;
 
@@ -53,6 +60,7 @@ export class SyncRunner {
 
   /** Start a sync, or queue one follow-up if a sync is running. Resolves when both are done. */
   requestSync(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
     if (this.running) {
       this.queued = true;
       return this.running;
@@ -63,6 +71,11 @@ export class SyncRunner {
     return this.running;
   }
 
+  /** Stop at the next step and start no more runs. Called when the plugin unloads. */
+  stop(): void {
+    this.stopped = true;
+  }
+
   getStatus(urlKey: string): WorkspaceStatus {
     return this.statuses.get(urlKey) ?? {};
   }
@@ -71,13 +84,15 @@ export class SyncRunner {
     do {
       this.queued = false;
       await this.runOnce();
-    } while (this.queued);
+    } while (this.queued && !this.stopped);
   }
 
   private async runOnce(): Promise<void> {
     const api = this.deps.getFlowApi();
     if (!api) return;
-    for (const workspace of this.deps.getData().settings.workspaces) {
+    // A copy, so removing a workspace mid-run doesn't skip another
+    for (const workspace of [...this.deps.getData().settings.workspaces]) {
+      if (this.stopped) return;
       await this.syncWorkspace(api, workspace);
     }
   }
@@ -94,8 +109,7 @@ export class SyncRunner {
 
     try {
       const client = this.deps.createClient(apiKey);
-      const awaiting = await this.syncWithClient(api, workspace, client);
-      this.updateRemovalCandidates(urlKey, awaiting);
+      await this.syncWithClient(api, workspace, client);
       this.refusedKeys.delete(urlKey);
       this.statuses.set(urlKey, { lastSuccessAt: this.now() });
     } catch (error) {
@@ -103,71 +117,98 @@ export class SyncRunner {
     }
   }
 
-  /** Returns the ticket keys whose label removal still waits for confirmation. */
   private async syncWithClient(
     api: FlowApi,
     workspace: WorkspaceSettings,
     client: LinearWorkspaceClient
-  ): Promise<string[]> {
+  ): Promise<void> {
     const data = this.deps.getData();
-    const { labelName } = data.settings;
     const prefix = `${workspace.urlKey}/`;
     const records = Object.fromEntries(
       Object.entries(data.tickets).filter(([key]) => key.startsWith(prefix))
     );
-    const focusItems = (await api.getFocusItems(SOURCE_NAME)).filter((item) =>
-      itemTicketKey(item)?.startsWith(prefix)
-    );
-    const untrackedIdentifiers = [
-      ...new Set(
-        focusItems
-          .map((item) => itemTicketKey(item) as string)
-          .filter((key) => !records[key])
-          .map((key) => key.slice(prefix.length))
-      ),
-    ];
 
-    const labelledTickets = await client.getLabelledTickets(labelName);
-    const trackedTickets = [
-      ...(await client.getTicketsByIds(Object.values(records).map((r) => r.issueId))),
-      ...(await client.getTicketsByIdentifiers(untrackedIdentifiers)),
-    ];
+    let actions: SyncAction[];
+    try {
+      const focusItems = (await api.getFocusItems(SOURCE_NAME)).filter((item) =>
+        itemTicketKey(item)?.startsWith(prefix)
+      );
+      const untrackedIdentifiers = [
+        ...new Set(
+          focusItems
+            .map((item) => itemTicketKey(item) as string)
+            .filter((key) => !records[key])
+            .map((key) => key.slice(prefix.length))
+        ),
+      ];
 
-    const cutoff = this.now() - this.confirmDelayMs;
-    const confirmedRemovals = new Set(
-      [...this.removalCandidates].filter(([, seen]) => seen <= cutoff).map(([key]) => key)
-    );
+      const labelId = await this.findLabelId(workspace, client);
+      const labelledTickets = labelId ? await client.getLabelledTickets(labelId) : [];
+      const trackedTickets = [
+        ...(await client.getTicketsByIds(Object.values(records).map((r) => r.issueId))),
+        ...(await client.getTicketsByIdentifiers(untrackedIdentifiers)),
+      ];
 
-    const actions = decideSyncActions({
-      workspace,
-      labelName,
-      labelledTickets,
-      trackedTickets,
-      records,
-      focusItems,
-      confirmedRemovals,
-    });
-
-    const awaiting: string[] = [];
-    for (const action of actions) {
-      if (action.type === "awaitRemoval") {
-        awaiting.push(action.ticketKey);
-        continue;
-      }
-      await this.carryOut(action, api, workspace, client);
+      actions = decideSyncActions({
+        workspace,
+        labelId,
+        labelledTickets,
+        trackedTickets,
+        records,
+        focusItems,
+        confirmedRemovals: this.confirmed(prefix, "remove"),
+        confirmedAdds: this.confirmed(prefix, "add"),
+      });
+    } catch (error) {
+      // Nothing was seen this pass, so earlier sightings can't be confirmed by the next one
+      this.updateCandidates(prefix, []);
+      throw error;
     }
-    return awaiting;
+
+    this.updateCandidates(prefix, actions);
+
+    // Carry on past a failed action so one stuck ticket doesn't hold up the rest, unless
+    // Linear itself is out of reach
+    let firstError: Error | null = null;
+    for (const action of actions) {
+      if (this.stopped) break;
+      if (action.type === "awaitRemoval" || action.type === "awaitAdd") continue;
+      try {
+        await this.carryOut(action, api, workspace, client);
+      } catch (error) {
+        if (error instanceof LinearError && error.kind !== "api") throw error;
+        firstError ??= error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    if (firstError !== null) throw firstError;
   }
 
-  private updateRemovalCandidates(urlKey: string, awaiting: string[]): void {
-    const prefix = `${urlKey}/`;
-    for (const key of [...this.removalCandidates.keys()]) {
-      if (key.startsWith(prefix) && !awaiting.includes(key)) this.removalCandidates.delete(key);
+  private confirmed(prefix: string, kind: "add" | "remove"): Set<string> {
+    const cutoff = this.now() - this.confirmDelayMs;
+    const confirmed = new Set<string>();
+    for (const [candidate, seen] of this.candidates) {
+      const [candidateKind, key] = splitCandidate(candidate);
+      if (candidateKind === kind && key.startsWith(prefix) && seen <= cutoff) confirmed.add(key);
     }
-    for (const key of awaiting) {
-      if (!this.removalCandidates.has(key)) this.removalCandidates.set(key, this.now());
+    return confirmed;
+  }
+
+  /** Keep the first sighting of each awaited change; forget changes this pass didn't await. */
+  private updateCandidates(prefix: string, actions: SyncAction[]): void {
+    const awaited = new Set<string>();
+    for (const action of actions) {
+      if (action.type === "awaitRemoval") awaited.add(`remove\n${action.ticketKey}`);
+      if (action.type === "awaitAdd") awaited.add(`add\n${action.ticketKey}`);
     }
-    if (awaiting.length > 0) {
+    for (const candidate of [...this.candidates.keys()]) {
+      if (splitCandidate(candidate)[1].startsWith(prefix) && !awaited.has(candidate)) {
+        this.candidates.delete(candidate);
+      }
+    }
+    for (const candidate of awaited) {
+      if (!this.candidates.has(candidate)) this.candidates.set(candidate, this.now());
+    }
+    if (awaited.size > 0) {
       this.deps.schedule(() => {
         this.requestSync().catch((error) => console.error("Flow Linear sync failed", error));
       }, this.confirmDelayMs);
@@ -187,13 +228,19 @@ export class SyncRunner {
       case "completeItems":
         await this.applyToItems(api, action.itemIds, (id) => api.completeFocusItem(id));
         break;
-      case "removeItems":
-        await this.applyToItems(api, action.itemIds, (id) => api.removeFocusItem(id));
+      case "removeItems": {
+        // An item completed on another device since this pass read Focus stays, for "done today"
+        const current = await api.getFocusItems(SOURCE_NAME);
+        const stillUnfinished = action.itemIds.filter((id) =>
+          current.some((item) => item.id === id && item.completedAt === undefined)
+        );
+        await this.applyToItems(api, stillUnfinished, (id) => api.removeFocusItem(id));
         await this.setRecord(action.ticketKey, null);
         break;
+      }
       case "addLabel": {
-        const labelId = await this.labelId(workspace, client);
-        await client.addLabel(action.issueId, labelId);
+        const labelId = await this.labelIdOrCreate(workspace, client);
+        await this.changeLabel(workspace, () => client.addLabel(action.issueId, labelId));
         await this.setRecord(action.ticketKey, { issueId: action.issueId, label: "synced" });
         break;
       }
@@ -203,8 +250,8 @@ export class SyncRunner {
           issueId: action.issueId,
           label: "remove-pending",
         });
-        const labelId = await this.labelId(workspace, client);
-        await client.removeLabel(action.issueId, labelId);
+        const labelId = await this.labelIdOrCreate(workspace, client);
+        await this.changeLabel(workspace, () => client.removeLabel(action.issueId, labelId));
         await this.setRecord(action.ticketKey, null);
         break;
       }
@@ -259,17 +306,44 @@ export class SyncRunner {
     }
   }
 
-  private async labelId(workspace: WorkspaceSettings, client: LinearWorkspaceClient) {
-    const { labelName } = this.deps.getData().settings;
-    const cacheKey = `${workspace.urlKey}\n${labelName.toLowerCase()}`;
-    let id = this.labelIds.get(cacheKey);
-    if (!id) {
-      id =
-        (await client.findWorkspaceLabel(labelName)) ??
-        (await client.createWorkspaceLabel(labelName));
-      this.labelIds.set(cacheKey, id);
-    }
+  private labelCacheKey(workspace: WorkspaceSettings): string {
+    return `${workspace.urlKey}\n${this.deps.getData().settings.labelName.toLowerCase()}`;
+  }
+
+  /** The workspace-level label's id, or null if the workspace doesn't have it yet. */
+  private async findLabelId(
+    workspace: WorkspaceSettings,
+    client: LinearWorkspaceClient
+  ): Promise<string | null> {
+    const cacheKey = this.labelCacheKey(workspace);
+    const cached = this.labelIds.get(cacheKey);
+    if (cached) return cached;
+    const id = await client.findWorkspaceLabel(this.deps.getData().settings.labelName);
+    if (id) this.labelIds.set(cacheKey, id);
     return id;
+  }
+
+  private async labelIdOrCreate(
+    workspace: WorkspaceSettings,
+    client: LinearWorkspaceClient
+  ): Promise<string> {
+    const found = await this.findLabelId(workspace, client);
+    if (found) return found;
+    const id = await client.createWorkspaceLabel(this.deps.getData().settings.labelName);
+    this.labelIds.set(this.labelCacheKey(workspace), id);
+    return id;
+  }
+
+  /** Run a label change; if Linear rejects it, look the label up afresh next time. */
+  private async changeLabel(workspace: WorkspaceSettings, change: () => Promise<void>) {
+    try {
+      await change();
+    } catch (error) {
+      if (error instanceof LinearError && error.kind === "api") {
+        this.labelIds.delete(this.labelCacheKey(workspace));
+      }
+      throw error;
+    }
   }
 
   private async setRecord(key: string, record: TicketRecord | null): Promise<void> {
@@ -286,7 +360,7 @@ export class SyncRunner {
 
     if (!(error instanceof LinearError)) {
       console.error(`Flow Linear sync failed for ${displayName}`, error);
-      this.notifyOnce(urlKey, `Flow Linear couldn't sync ${displayName}: ${message}`);
+      this.notifyOnce(urlKey, "other", `Flow Linear couldn't sync ${displayName}: ${message}`);
       return;
     }
     switch (error.kind) {
@@ -294,6 +368,7 @@ export class SyncRunner {
         this.refusedKeys.set(urlKey, apiKey);
         this.notifyOnce(
           urlKey,
+          "auth",
           `Linear refused the API key for ${displayName}. Check it in Flow Linear's settings.`
         );
         break;
@@ -304,14 +379,16 @@ export class SyncRunner {
       }
       case "network":
       case "api":
-        this.notifyOnce(urlKey, `Couldn't reach Linear for ${displayName}`);
+        this.notifyOnce(urlKey, "unreachable", `Couldn't reach Linear for ${displayName}`);
         break;
     }
   }
 
-  private notifyOnce(urlKey: string, message: string): void {
-    if (this.notified.has(urlKey)) return;
-    this.notified.add(urlKey);
+  // One notice per workspace and kind of problem per session
+  private notifyOnce(urlKey: string, kind: string, message: string): void {
+    const key = `${urlKey}\n${kind}`;
+    if (this.notified.has(key)) return;
+    this.notified.add(key);
     this.deps.notify(message);
   }
 }

@@ -79,7 +79,7 @@ describe("getOrganization", () => {
 describe("getLabelledTickets", () => {
   it("follows pagination and parses tickets", async () => {
     serve([200, "labelled-page-1"], [200, "labelled-page-2"]);
-    const tickets = await client.getLabelledTickets("flow-focus");
+    const tickets = await client.getLabelledTickets("label-uuid-1");
 
     expect(tickets).toEqual([
       {
@@ -88,7 +88,7 @@ describe("getLabelledTickets", () => {
         url: "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
         title: "Write the onboarding guide",
         stateType: "started",
-        labelNames: ["flow-focus", "Bug"],
+        labelIds: ["label-uuid-1", "label-uuid-bug"],
         trashed: false,
       },
       {
@@ -97,12 +97,12 @@ describe("getLabelledTickets", () => {
         url: "https://linear.app/testco/issue/TST-2/fix-the-login-page",
         title: "Fix the login page",
         stateType: "unstarted",
-        labelNames: ["Flow-Focus"],
+        labelIds: ["label-uuid-1"],
         trashed: false,
       },
     ]);
     expect(sentBody(0).variables).toEqual({
-      filter: { labels: { name: { eqIgnoreCase: "flow-focus" } } },
+      filter: { labels: { id: { eq: "label-uuid-1" } } },
       after: null,
     });
     expect(sentBody(1).variables.after).toBe("cursor-1");
@@ -231,7 +231,7 @@ describe("errors", () => {
 
   it("maps other GraphQL errors to an api error with Linear's message", async () => {
     serve([400, "error-invalid-input"]);
-    const error = await linearError(client.getLabelledTickets("flow-focus"));
+    const error = await linearError(client.getLabelledTickets("label-uuid-1"));
     expect(error.kind).toBe("api");
     expect(error.message).toBe("Argument Validation Error");
   });

@@ -9,7 +9,7 @@
           "title": "Write the onboarding guide",
           "trashed": null,
           "state": { "type": "started" },
-          "labels": { "nodes": [{ "name": "flow-focus" }, { "name": "Bug" }] }
+          "labels": { "nodes": [{ "id": "label-uuid-1" }, { "id": "label-uuid-bug" }] }
         }
       ],
       "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" }

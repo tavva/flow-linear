@@ -54,6 +54,24 @@ last error.
 API keys are stored per device, so enter them on each computer where you want
 syncing to run. A device without a key leaves that workspace alone.
 
+If you rename the label, Flow Linear puts the new label on every ticket it tracks
+that still has unfinished Focus items. It doesn't take the old label off; remove or
+delete it in Linear if you no longer want it. Only the workspace-level label
+counts: a team label with the same name is ignored.
+
+### Several devices
+
+Focus items sync with your vault. Flow Linear's ticket records live in its
+`data.json`, so they sync too if your sync tool includes plugin settings (in
+Obsidian Sync, "Installed community plugins" settings). Turn that on when Flow
+Linear runs on more than one device; without it, each device keeps its own records
+and they can disagree.
+
+Because one device's focus file can lag behind another's, Flow Linear waits before
+acting on what it sees in Focus alone. It takes a label off only when a check at
+least 30 seconds after the first still finds no unfinished item, and it adds the
+label for an item that arrived from another device the same way.
+
 ## Network use
 
 Flow Linear connects to one service: Linear's API at `https://api.linear.app`,

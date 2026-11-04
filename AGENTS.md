@@ -48,7 +48,12 @@ Flow reports Flow Linear's own writes back as change events, and coalesces
 changes, so a sync must be safe to run at any time and do nothing when nothing
 has changed. Treat `removed` events and missing items as hints: the label comes
 off only when a pass at least `REMOVAL_CONFIRM_DELAY_MS` after the first still
-finds no unfinished item.
+finds no unfinished item. Adding the label for an item with no record (one from
+another device) waits the same way.
+
+"Labelled" means carrying the workspace-level label's id, never a label matched by
+name. A linked item whose ticket Linear doesn't return and that has no record is
+left alone; only a record whose UUID comes back missing counts as deleted.
 
 ## Releasing
 

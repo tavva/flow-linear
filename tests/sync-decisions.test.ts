@@ -3,17 +3,18 @@
 
 import { decideSyncActions, itemTicketKey, SyncInput } from "../src/sync-decisions";
 import { TicketRecord } from "../src/settings";
-import { focusItem, labelled, ticket, workspace } from "./helpers/builders";
+import { FOCUS_LABEL_ID, focusItem, labelled, ticket, workspace } from "./helpers/builders";
 
 function decide(overrides: Partial<SyncInput>) {
   return decideSyncActions({
     workspace: workspace(),
-    labelName: "flow-focus",
+    labelId: FOCUS_LABEL_ID,
     labelledTickets: [],
     trackedTickets: [],
     records: {},
     focusItems: [],
     confirmedRemovals: new Set(),
+    confirmedAdds: new Set(),
     ...overrides,
   });
 }
@@ -89,11 +90,9 @@ describe("deleted in Linear", () => {
     ).toEqual([{ type: "setRecord", ticketKey: "testco/TST-1", record: null }]);
   });
 
-  it("completes items of an untracked ticket that Linear doesn't have", () => {
-    const item = focusItem("TST-9");
-    expect(decide({ focusItems: [item] })).toEqual([
-      { type: "completeItems", ticketKey: "testco/TST-9", itemIds: [item.id] },
-    ]);
+  it("leaves alone items of an untracked ticket that Linear didn't return", () => {
+    // It may be in a team the key can't see, or have moved
+    expect(decide({ focusItems: [focusItem("TST-9")] })).toEqual([]);
   });
 });
 
@@ -105,11 +104,28 @@ describe("rule 2: label added in Linear", () => {
     ]);
   });
 
-  it("matches the label name case-insensitively via the labelled query", () => {
-    const t = ticket("TST-1", { labelNames: ["Flow-Focus"] });
-    expect(decide({ labelledTickets: [t] })).toEqual([
-      { type: "import", ticketKey: "testco/TST-1", ticket: t },
-    ]);
+  it("counts a ticket as labelled only by the workspace label's id", () => {
+    // A team label of the same name has another id
+    const teamLabelled = ticket("TST-1", { labelIds: ["team-label"] });
+    expect(
+      decide({
+        trackedTickets: [teamLabelled],
+        records: { "testco/TST-1": synced("TST-1") },
+        focusItems: [],
+      })
+    ).toEqual([{ type: "removeItems", ticketKey: "testco/TST-1", itemIds: [] }]);
+  });
+
+  it("sees no label anywhere while the workspace has none", () => {
+    const item = focusItem("TST-1");
+    expect(
+      decide({
+        labelId: null,
+        trackedTickets: [ticket("TST-1", { labelIds: ["team-label"] })],
+        records: { "testco/TST-1": pending("TST-1", "add-pending") },
+        focusItems: [item],
+      })
+    ).toEqual([{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
   });
 
   it("imports again when the ticket's only linked items are completed", () => {
@@ -151,10 +167,12 @@ describe("rule 4: label to add", () => {
     ).toEqual([{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
   });
 
-  it("adds the label when the item came from another device and there's no record", () => {
-    expect(decide({ trackedTickets: [ticket("TST-1")], focusItems: [focusItem("TST-1")] })).toEqual(
-      [{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]
-    );
+  it("waits before adding the label for an item from another device with no record", () => {
+    const input = { trackedTickets: [ticket("TST-1")], focusItems: [focusItem("TST-1")] };
+    expect(decide(input)).toEqual([{ type: "awaitAdd", ticketKey: "testco/TST-1" }]);
+    expect(decide({ ...input, confirmedAdds: new Set(["testco/TST-1"]) })).toEqual([
+      { type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" },
+    ]);
   });
 
   it("adds the label back when an item returns while a removal is pending", () => {
@@ -318,5 +336,40 @@ describe("identifier changes", () => {
         focusItems: [focusItem("TST-1")],
       })
     ).toEqual([]);
+  });
+
+  it("counts items linked by the new identifier towards the tracked ticket", () => {
+    const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
+    expect(
+      decide({
+        labelledTickets: [moved],
+        trackedTickets: [moved],
+        records: { "testco/TST-1": synced("TST-1") },
+        focusItems: [focusItem("NEW-7")],
+      })
+    ).toEqual([]);
+  });
+
+  it("merges two records for one ticket, keeping the first key", () => {
+    const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
+    expect(
+      decide({
+        labelledTickets: [moved],
+        trackedTickets: [moved],
+        records: {
+          "testco/TST-1": synced("TST-1"),
+          "testco/NEW-7": pending("TST-1", "add-pending"),
+        },
+        focusItems: [focusItem("TST-1", { completedAt: 1 }), focusItem("NEW-7")],
+      })
+    ).toEqual([
+      // "testco/NEW-7" sorts first, so it stays; the other record goes
+      { type: "setRecord", ticketKey: "testco/TST-1", record: null },
+      {
+        type: "setRecord",
+        ticketKey: "testco/NEW-7",
+        record: { issueId: "uuid-testco-TST-1", label: "synced" },
+      },
+    ]);
   });
 });

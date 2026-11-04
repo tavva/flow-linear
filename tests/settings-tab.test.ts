@@ -98,6 +98,25 @@ describe("FlowLinearSettingTab", () => {
     unload(plugin);
   });
 
+  it("marks every tracked ticket for the new label when the label is renamed", async () => {
+    const { tab, plugin } = await setUp();
+    const sync = jest.spyOn(plugin, "requestSync");
+    plugin.data.tickets["testco/TST-1"] = { issueId: "uuid-1", label: "synced" };
+    plugin.data.tickets["testco/TST-2"] = { issueId: "uuid-2", label: "remove-pending" };
+
+    await tab.setControlValue("labelName", "flow-focus");
+    expect(plugin.data.tickets["testco/TST-1"].label).toBe("synced");
+    expect(sync).not.toHaveBeenCalled();
+
+    await tab.setControlValue("labelName", "ben-focus");
+    expect(plugin.data.tickets).toEqual({
+      "testco/TST-1": { issueId: "uuid-1", label: "add-pending" },
+      "testco/TST-2": { issueId: "uuid-2", label: "add-pending" },
+    });
+    expect(sync).toHaveBeenCalled();
+    unload(plugin);
+  });
+
   it("stores the interval and restarts the check timer", async () => {
     const { tab, plugin, group } = await setUp();
     const restart = jest.spyOn(plugin, "restartCheckInterval");

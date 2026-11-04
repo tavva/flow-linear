@@ -9,7 +9,7 @@
           "title": "Fix the login page",
           "trashed": false,
           "state": { "type": "unstarted" },
-          "labels": { "nodes": [{ "name": "Flow-Focus" }] }
+          "labels": { "nodes": [{ "id": "label-uuid-1" }] }
         }
       ],
       "pageInfo": { "hasNextPage": false, "endCursor": "cursor-2" }

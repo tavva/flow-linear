@@ -92,6 +92,7 @@ export default class FlowLinearPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.runner.stop();
     this.disconnect();
     for (const id of this.timers) window.clearTimeout(id);
     this.timers.clear();
@@ -100,6 +101,17 @@ export default class FlowLinearPlugin extends Plugin {
   getSecret(name: string): string | null {
     if (name === "") return null;
     return this.app.secretStorage.getSecret(name);
+  }
+
+  /** data.json changed on disk, as when Obsidian Sync brings another device's records. */
+  async onExternalSettingsChange(): Promise<void> {
+    const data = readStoredData(await this.loadData());
+    // Replace contents rather than objects, so the settings tab and a running sync see them
+    Object.assign(this.data.settings, data.settings);
+    for (const key of Object.keys(this.data.tickets)) delete this.data.tickets[key];
+    Object.assign(this.data.tickets, data.tickets);
+    this.restartCheckInterval();
+    this.requestSync();
   }
 
   createClient(apiKey: string): LinearWorkspaceClient {

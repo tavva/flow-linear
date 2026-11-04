@@ -12,22 +12,25 @@ export type SyncAction =
   | { type: "completeItems"; ticketKey: string; itemIds: string[] }
   | { type: "addLabel"; ticketKey: string; issueId: string } // On success, record "synced"
   | { type: "removeLabel"; ticketKey: string; issueId: string } // On success, delete the record
-  // No unfinished items were found, but that might be a passing glitch in the Focus file.
-  // The label comes off only once a later pass confirms it.
+  // What Focus shows might be a passing state: a sync glitch, or a device whose focus file is
+  // behind. The label changes only once a later pass, after a settle delay, still sees it.
   | { type: "awaitRemoval"; ticketKey: string }
+  | { type: "awaitAdd"; ticketKey: string }
   | { type: "setRecord"; ticketKey: string; record: TicketRecord | null };
 
 export interface SyncInput {
   workspace: WorkspaceSettings;
-  labelName: string;
+  // The workspace-level label's id; null if the workspace doesn't have the label yet
+  labelId: string | null;
   labelledTickets: LinearTicket[]; // Currently carry the label
-  // Every ticket asked about by UUID (tracked records) or identifier (linked items without a
-  // record). A ticket asked about but missing here has been deleted.
+  // Tickets asked for by UUID (records) and by identifier (linked items without a record).
+  // A record whose ticket is missing here has been deleted.
   trackedTickets: LinearTicket[];
   records: Record<string, TicketRecord>; // This workspace's records
   focusItems: ExternalFocusItem[]; // sourceName "linear"; items for other workspaces are ignored
-  // Tickets whose lack of unfinished items an earlier pass saw and a settle delay has passed
+  // Ticket keys whose awaited change an earlier pass saw, at least a settle delay ago
   confirmedRemovals: ReadonlySet<string>;
+  confirmedAdds: ReadonlySet<string>;
 }
 
 const CLOSED_STATE_TYPES = new Set(["completed", "canceled"]);
@@ -39,34 +42,57 @@ export function itemTicketKey(item: ExternalFocusItem): string | null {
 }
 
 export function decideSyncActions(input: SyncInput): SyncAction[] {
-  const { workspace, records, confirmedRemovals } = input;
-  const labelName = input.labelName.toLowerCase();
+  const { workspace, labelId, confirmedRemovals, confirmedAdds } = input;
   const keyFor = (identifier: string) =>
     ticketKey({ urlKey: workspace.urlKey, identifier: identifier.toUpperCase() });
+  const actions: SyncAction[] = [];
 
-  // A record follows its ticket by UUID, even if the ticket's identifier has changed
+  // One record per ticket: a ticket whose identifier changed may have gained a second record
+  // under its new key. The first key in order is kept and the others are dropped.
   const recordKeyByIssueId = new Map<string, string>();
-  for (const [key, record] of Object.entries(records)) {
+  const records: Record<string, TicketRecord> = {};
+  for (const key of Object.keys(input.records).sort()) {
+    const record = input.records[key];
+    if (recordKeyByIssueId.has(record.issueId)) {
+      actions.push({ type: "setRecord", ticketKey: key, record: null });
+      continue;
+    }
     recordKeyByIssueId.set(record.issueId, key);
+    records[key] = record;
   }
+
+  // Keys that name a tracked ticket by an identifier it no longer has, or had before
+  const aliases = new Map<string, string>();
+  for (const [key, record] of Object.entries(input.records)) {
+    const canonical = recordKeyByIssueId.get(record.issueId) as string;
+    if (key !== canonical) aliases.set(key, canonical);
+  }
+  for (const ticket of input.trackedTickets) {
+    const recordKey = recordKeyByIssueId.get(ticket.id);
+    if (recordKey && keyFor(ticket.identifier) !== recordKey) {
+      aliases.set(keyFor(ticket.identifier), recordKey);
+    }
+  }
+  const keyOfTicket = (ticket: LinearTicket) =>
+    recordKeyByIssueId.get(ticket.id) ??
+    aliases.get(keyFor(ticket.identifier)) ??
+    keyFor(ticket.identifier);
+
   const ticketsByKey = new Map<string, LinearTicket>();
   for (const ticket of [...input.trackedTickets, ...input.labelledTickets]) {
-    ticketsByKey.set(recordKeyByIssueId.get(ticket.id) ?? keyFor(ticket.identifier), ticket);
+    ticketsByKey.set(keyOfTicket(ticket), ticket);
   }
+  const labelledKeys = new Set(input.labelledTickets.map(keyOfTicket));
 
   const itemsByKey = new Map<string, ExternalFocusItem[]>();
   for (const item of input.focusItems) {
-    const key = itemTicketKey(item);
-    if (!key || !key.startsWith(`${workspace.urlKey}/`)) continue;
+    const itemKey = itemTicketKey(item);
+    if (!itemKey || !itemKey.startsWith(`${workspace.urlKey}/`)) continue;
+    const key = aliases.get(itemKey) ?? itemKey;
     itemsByKey.set(key, [...(itemsByKey.get(key) ?? []), item]);
   }
 
-  const labelledKeys = new Set(
-    input.labelledTickets.map((t) => recordKeyByIssueId.get(t.id) ?? keyFor(t.identifier))
-  );
   const keys = new Set([...labelledKeys, ...Object.keys(records), ...itemsByKey.keys()]);
-
-  const actions: SyncAction[] = [];
   for (const key of [...keys].sort()) {
     const record = records[key];
     const ticket = ticketsByKey.get(key);
@@ -74,8 +100,11 @@ export function decideSyncActions(input: SyncInput): SyncAction[] {
       .filter((item) => item.completedAt === undefined)
       .map((item) => item.id);
     const labelled =
-      labelledKeys.has(key) ||
-      (ticket?.labelNames.some((name) => name.toLowerCase() === labelName) ?? false);
+      labelledKeys.has(key) || (labelId !== null && (ticket?.labelIds.includes(labelId) ?? false));
+
+    // A linked item for a ticket Linear didn't return, with no record: it may be in a team the
+    // key can't see, or have moved. Leave it alone.
+    if (!ticket && !record) continue;
 
     // 1. Closed or deleted in Linear: finish its items, then let the label go
     if (!ticket || ticket.trashed || CLOSED_STATE_TYPES.has(ticket.stateType)) {
@@ -106,8 +135,13 @@ export function decideSyncActions(input: SyncInput): SyncAction[] {
 
     if (unfinishedIds.length > 0) {
       if (!labelled) {
-        // 4. Label to add. No record means the item came from another device.
-        actions.push({ type: "addLabel", ticketKey: key, issueId: record?.issueId ?? ticket.id });
+        // 4. Label to add. With no record the item came from another device, whose focus file
+        // may be ahead of or behind Linear, so wait for a later pass to confirm it.
+        if (record || confirmedAdds.has(key)) {
+          actions.push({ type: "addLabel", ticketKey: key, issueId: record?.issueId ?? ticket.id });
+        } else {
+          actions.push({ type: "awaitAdd", ticketKey: key });
+        }
       } else if (record?.label !== "synced" || record.issueId !== ticket.id) {
         // 6. Label present and wanted
         actions.push({

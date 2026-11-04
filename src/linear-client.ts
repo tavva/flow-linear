@@ -13,7 +13,7 @@ export interface LinearTicket {
   url: string;
   title: string;
   stateType: string;
-  labelNames: string[];
+  labelIds: string[];
   trashed: boolean;
 }
 
@@ -38,7 +38,7 @@ export class LinearError extends Error {
 export interface LinearWorkspaceClient {
   getOrganization(): Promise<LinearOrganization>;
   getTicketByIdentifier(identifier: string): Promise<LinearTicket | null>;
-  getLabelledTickets(labelName: string): Promise<LinearTicket[]>;
+  getLabelledTickets(labelId: string): Promise<LinearTicket[]>;
   getTicketsByIds(ids: string[]): Promise<LinearTicket[]>;
   getTicketsByIdentifiers(identifiers: string[]): Promise<LinearTicket[]>;
   findWorkspaceLabel(labelName: string): Promise<string | null>;
@@ -47,7 +47,7 @@ export interface LinearWorkspaceClient {
   removeLabel(issueId: string, labelId: string): Promise<void>;
 }
 
-const TICKET_FIELDS = `id identifier url title trashed state { type } labels { nodes { name } }`;
+const TICKET_FIELDS = `id identifier url title trashed state { type } labels { nodes { id } }`;
 
 interface TicketNode {
   id: string;
@@ -56,7 +56,7 @@ interface TicketNode {
   title: string;
   trashed?: boolean | null;
   state?: { type: string } | null;
-  labels?: { nodes: { name: string }[] } | null;
+  labels?: { nodes: { id: string }[] } | null;
 }
 
 interface IssuePage {
@@ -78,7 +78,7 @@ function toTicket(node: TicketNode): LinearTicket {
     url: node.url,
     title: node.title,
     stateType: node.state?.type ?? "",
-    labelNames: node.labels?.nodes.map((label) => label.name) ?? [],
+    labelIds: node.labels?.nodes.map((label) => label.id) ?? [],
     trashed: node.trashed === true,
   };
 }
@@ -114,8 +114,9 @@ export class LinearClient implements LinearWorkspaceClient {
     return tickets.find((ticket) => ticket.identifier === identifier) ?? null;
   }
 
-  getLabelledTickets(labelName: string): Promise<LinearTicket[]> {
-    return this.queryIssues({ labels: { name: { eqIgnoreCase: labelName } } });
+  // By id, so a team label that happens to share the name doesn't count
+  getLabelledTickets(labelId: string): Promise<LinearTicket[]> {
+    return this.queryIssues({ labels: { id: { eq: labelId } } });
   }
 
   getTicketsByIds(ids: string[]): Promise<LinearTicket[]> {

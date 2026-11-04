@@ -153,8 +153,11 @@ describe("importing a ticket labelled in Linear", () => {
 describe("adding the label for items added in Flow", () => {
   it("creates the workspace label once, adds it and marks the record synced", async () => {
     const h = new Harness();
+    h.testco.labels.clear();
     h.testco.tickets = [ticket("TST-1"), ticket("TST-2")];
     h.focus.items = [focusItem("TST-1"), focusItem("TST-2")];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "add-pending" };
+    h.data.tickets["testco/TST-2"] = { issueId: "uuid-testco-TST-2", label: "add-pending" };
 
     await h.sync();
 
@@ -163,7 +166,7 @@ describe("adding the label for items added in Flow", () => {
       "add label TST-1",
       "add label TST-2",
     ]);
-    expect(h.testco.calls.filter((c) => c === "findWorkspaceLabel")).toHaveLength(1);
+    expect(h.testco.calls.filter((c) => c === "getLabelledTickets")).toHaveLength(0);
     expect(h.data.tickets["testco/TST-1"]).toEqual({
       issueId: "uuid-testco-TST-1",
       label: "synced",
@@ -175,6 +178,7 @@ describe("adding the label for items added in Flow", () => {
     h.testco.labels.set("flow-focus", "label-existing");
     h.testco.tickets = [ticket("TST-1")];
     h.focus.items = [focusItem("TST-1")];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "add-pending" };
     await h.sync();
     expect(h.testco.writes).toEqual(["add label TST-1"]);
   });
@@ -194,6 +198,49 @@ describe("adding the label for items added in Flow", () => {
     await h.sync();
     expect(h.data.tickets["testco/TST-1"].label).toBe("synced");
     expect(h.runner.getStatus("testco")).toEqual({ lastSuccessAt: h.clock });
+  });
+});
+
+describe("items added on another device", () => {
+  it("adds the label only once a later pass still finds the item", async () => {
+    const h = new Harness();
+    h.testco.tickets = [ticket("TST-1")];
+    h.focus.items = [focusItem("TST-1")];
+
+    await h.sync();
+    expect(h.testco.writes).toEqual([]);
+    expect(h.scheduled).toHaveLength(1);
+
+    await h.passTime(CONFIRM_MS);
+    expect(h.testco.writes).toEqual(["add label TST-1"]);
+    expect(h.data.tickets["testco/TST-1"].label).toBe("synced");
+  });
+
+  it("doesn't add the label back for an item another device has since removed", async () => {
+    const h = new Harness();
+    h.testco.tickets = [ticket("TST-1")];
+    h.focus.items = [focusItem("TST-1")];
+
+    await h.sync();
+    // This device's focus file catches up: the item was removed elsewhere
+    h.focus.replaceAll([]);
+    await h.passTime(CONFIRM_MS);
+
+    expect(h.testco.writes).toEqual([]);
+    expect(h.data.tickets).toEqual({});
+  });
+});
+
+describe("a team label with the same name", () => {
+  it("isn't taken for the workspace label", async () => {
+    const h = new Harness();
+    // Carries a team's own "flow-focus" label, not the workspace one
+    h.testco.tickets = [ticket("TST-1", { labelIds: ["team-flow-focus"] })];
+
+    await h.sync();
+
+    expect(h.focus.items).toEqual([]);
+    expect(h.data.tickets).toEqual({});
   });
 });
 
@@ -344,6 +391,114 @@ describe("changes made in Linear", () => {
   });
 });
 
+describe("a failing action", () => {
+  it("doesn't hold up the other actions, and is reported", async () => {
+    const h = new Harness();
+    h.testco.tickets = [labelled("TST-1"), labelled("TST-2", { stateType: "completed" })];
+    h.focus.items = [focusItem("TST-2")];
+    h.data.tickets["testco/TST-2"] = { issueId: "uuid-testco-TST-2", label: "synced" };
+    // TST-1's import fails; TST-2, sorted after it, must still be handled
+    h.focus.spheres = [];
+    h.data.settings.workspaces[0].defaultSphere = "";
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    await h.sync();
+
+    expect(h.focus.items[0].completedAt).toBeDefined();
+    expect(h.testco.writes).toEqual(["remove label TST-2"]);
+    expect(h.runner.getStatus("testco").error).toMatch(/No sphere/);
+    consoleError.mockRestore();
+  });
+
+  it("stops the workspace when Linear can't be reached", async () => {
+    const h = new Harness();
+    h.testco.tickets = [ticket("TST-1"), ticket("TST-2")];
+    h.focus.items = [focusItem("TST-1"), focusItem("TST-2")];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "add-pending" };
+    h.data.tickets["testco/TST-2"] = { issueId: "uuid-testco-TST-2", label: "add-pending" };
+    h.testco.failNext("addLabel", "network");
+
+    await h.sync();
+
+    expect(h.testco.calls.filter((c) => c === "addLabel")).toHaveLength(1);
+    expect(h.data.tickets["testco/TST-2"].label).toBe("add-pending");
+  });
+
+  it("looks the label up afresh after Linear rejects a label change", async () => {
+    const h = new Harness();
+    h.testco.tickets = [ticket("TST-1")];
+    h.focus.items = [focusItem("TST-1")];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "add-pending" };
+    await h.sync();
+    h.data.tickets["testco/TST-1"].label = "add-pending";
+    h.testco.tickets[0].labelIds = [];
+    // The label was deleted in Linear and made again with a new id
+    h.testco.labels.set("flow-focus", "label-recreated");
+
+    await h.sync();
+    expect(h.runner.getStatus("testco").error).toBe("Label not found");
+    await h.sync();
+    expect(h.testco.tickets[0].labelIds).toEqual(["label-recreated"]);
+    expect(h.data.tickets["testco/TST-1"].label).toBe("synced");
+  });
+
+  it("forgets earlier sightings when a pass can't read Linear", async () => {
+    const h = new Harness();
+    h.testco.tickets = [labelled("TST-1")];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "synced" };
+
+    await h.sync();
+    h.clock += CONFIRM_MS;
+    h.testco.failNext("getTicketsByIds", "network");
+    await h.sync();
+    // The pass after the failure starts the wait again rather than removing at once
+    h.clock += 1000;
+    await h.sync();
+
+    expect(h.testco.writes).toEqual([]);
+  });
+});
+
+describe("removing items", () => {
+  it("keeps an item completed on another device since the pass read Focus", async () => {
+    const h = new Harness();
+    h.testco.tickets = [ticket("TST-1")];
+    const item = focusItem("TST-1");
+    h.focus.items = [item];
+    h.data.tickets["testco/TST-1"] = { issueId: "uuid-testco-TST-1", label: "synced" };
+    const realGet = h.focus.getFocusItems.bind(h.focus);
+    let reads = 0;
+    h.focus.getFocusItems = async (source) => {
+      if (++reads === 2) h.focus.items[0].completedAt = 7;
+      return realGet(source);
+    };
+
+    await h.sync();
+
+    expect(h.focus.items).toHaveLength(1);
+    expect(h.data.tickets).toEqual({});
+  });
+});
+
+describe("stopping", () => {
+  it("starts no more runs and stops a running one between steps", async () => {
+    const h = new Harness([workspace("testco"), workspace("otherco")]);
+    h.linear.set("linear-otherco", new LinearWorkspace("otherco", "Otherco"));
+    h.secrets.set("linear-otherco", "linear-otherco");
+    const getLabelled = h.testco.getLabelledTickets.bind(h.testco);
+    h.testco.getLabelledTickets = async (id) => {
+      h.runner.stop();
+      return getLabelled(id);
+    };
+
+    await h.sync();
+    await h.sync();
+
+    expect(h.testco.calls.filter((c) => c === "findWorkspaceLabel")).toHaveLength(1);
+    expect((h.linear.get("linear-otherco") as LinearWorkspace).calls).toEqual([]);
+  });
+});
+
 describe("failures", () => {
   it("skips a workspace with no key on this device, without a notice", async () => {
     const h = new Harness();
@@ -356,11 +511,11 @@ describe("failures", () => {
 
   it("stays idle after Linear refuses the key, until the key changes", async () => {
     const h = new Harness();
-    h.testco.failNext("getLabelledTickets", "auth");
+    h.testco.failNext("findWorkspaceLabel", "auth");
 
     await h.sync();
     await h.sync();
-    expect(h.testco.calls).toEqual(["getLabelledTickets"]);
+    expect(h.testco.calls).toEqual(["findWorkspaceLabel"]);
     expect(h.notices).toEqual([
       "Linear refused the API key for Testco. Check it in Flow Linear's settings.",
     ]);
@@ -373,11 +528,11 @@ describe("failures", () => {
 
   it("skips a rate-limited workspace until the next interval", async () => {
     const h = new Harness();
-    h.testco.failNext("getLabelledTickets", "rate-limit");
+    h.testco.failNext("findWorkspaceLabel", "rate-limit");
     await h.sync();
     h.clock += 60_000;
     await h.sync();
-    expect(h.testco.calls).toEqual(["getLabelledTickets"]);
+    expect(h.testco.calls).toEqual(["findWorkspaceLabel"]);
     expect(h.notices).toEqual([]);
 
     h.clock += 5 * 60_000;
@@ -399,6 +554,11 @@ describe("failures", () => {
 
     expect(h.notices).toEqual(["Couldn't reach Linear for Testco"]);
     expect(h.focus.items.map((i) => i.external.externalId)).toEqual(["OTH-1"]);
+
+    // A different problem still gets its own notice
+    h.testco.failNext("getLabelledTickets", "auth");
+    await h.sync();
+    expect(h.notices).toHaveLength(2);
   });
 
   it("does nothing without Flow", async () => {

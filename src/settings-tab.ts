@@ -109,7 +109,12 @@ export class FlowLinearSettingTab extends PluginSettingTab {
   async setControlValue(key: string, value: unknown): Promise<void> {
     const { settings } = this.plugin;
     if (key === "labelName" && typeof value === "string" && value.trim() !== "") {
+      if (value.trim() === settings.labelName) return;
       settings.labelName = value.trim();
+      // No ticket carries the new label yet; put it on every tracked ticket that still has
+      // unfinished items, rather than reading its absence as removal in Linear
+      for (const record of Object.values(this.plugin.data.tickets)) record.label = "add-pending";
+      this.plugin.requestSync();
     } else if (key === "checkIntervalMinutes" && typeof value === "number") {
       settings.checkIntervalMinutes = clampInterval(value);
       this.plugin.restartCheckInterval();

@@ -26,7 +26,7 @@ export function ticket(
     url: `https://linear.app/${urlKey}/issue/${identifier}/some-title`,
     title: `Title of ${identifier}`,
     stateType: "started",
-    labelNames: [],
+    labelIds: [],
     trashed: false,
     ...rest,
   };
@@ -36,8 +36,11 @@ export function labelled(
   identifier: string,
   overrides: Partial<LinearTicket> & { urlKey?: string } = {}
 ) {
-  return ticket(identifier, { labelNames: ["flow-focus"], ...overrides });
+  return ticket(identifier, { labelIds: [FOCUS_LABEL_ID], ...overrides });
 }
+
+// The workspace-level label's id in tests; LinearWorkspace starts with it
+export const FOCUS_LABEL_ID = "label-1";
 
 let nextItem = 1;
 

@@ -240,6 +240,31 @@ describe("data and secrets", () => {
   });
 });
 
+describe("data changed on another device", () => {
+  it("reloads settings and records into the same objects and syncs", async () => {
+    const { plugin, workspace } = setUp();
+    const requestSync = await load(plugin, workspace);
+    requestSync.mockClear();
+    const settings = plugin.settings;
+    plugin.data.tickets["testco/OLD-1"] = { issueId: "uuid-old", label: "synced" };
+    (plugin as unknown as { stored: unknown }).stored = {
+      settings: { workspaces: [], labelName: "ben-focus", checkIntervalMinutes: 2 },
+      tickets: { "testco/NEW-1": { issueId: "uuid-new", label: "add-pending" } },
+    };
+
+    await plugin.onExternalSettingsChange();
+
+    expect(plugin.settings).toBe(settings);
+    expect(settings.labelName).toBe("ben-focus");
+    expect(plugin.data.tickets).toEqual({
+      "testco/NEW-1": { issueId: "uuid-new", label: "add-pending" },
+    });
+    expect(requestSync).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(2 * 60_000);
+    expect(requestSync).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("unload", () => {
   it("unsubscribes from Flow and cancels pending syncs", async () => {
     const store = new FocusStore();
@@ -253,5 +278,13 @@ describe("unload", () => {
 
     expect(store.listenerCount("linear")).toBe(0);
     expect(requestSync).not.toHaveBeenCalled();
+  });
+
+  it("stops the sync runner", async () => {
+    const { plugin, workspace } = setUp();
+    await load(plugin, workspace);
+    const stop = jest.spyOn(plugin.runner, "stop");
+    (plugin as unknown as { unload(): void }).unload();
+    expect(stop).toHaveBeenCalled();
   });
 });

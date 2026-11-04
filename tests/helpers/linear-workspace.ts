@@ -7,16 +7,17 @@ import {
   LinearTicket,
   LinearWorkspaceClient,
 } from "../../src/linear-client";
+import { FOCUS_LABEL_ID } from "./builders";
 
 type Method = keyof LinearWorkspaceClient;
 
 export class LinearWorkspace implements LinearWorkspaceClient {
   tickets: LinearTicket[] = [];
-  labels = new Map<string, string>(); // name → id, workspace-level only
+  labels = new Map<string, string>([["flow-focus", FOCUS_LABEL_ID]]); // name → id, workspace-level
   writes: string[] = [];
   calls: Method[] = [];
   private failures = new Map<Method, LinearErrorKind>();
-  private nextLabel = 1;
+  private nextLabel = 2;
 
   constructor(
     public urlKey = "testco",
@@ -46,13 +47,9 @@ export class LinearWorkspace implements LinearWorkspaceClient {
     return structuredClone(this.tickets.find((t) => t.identifier === identifier) ?? null);
   }
 
-  async getLabelledTickets(labelName: string) {
+  async getLabelledTickets(labelId: string) {
     this.call("getLabelledTickets");
-    return structuredClone(
-      this.tickets.filter((t) =>
-        t.labelNames.some((n) => n.toLowerCase() === labelName.toLowerCase())
-      )
-    );
+    return structuredClone(this.tickets.filter((t) => t.labelIds.includes(labelId)));
   }
 
   async getTicketsByIds(ids: string[]) {
@@ -81,16 +78,16 @@ export class LinearWorkspace implements LinearWorkspaceClient {
   async addLabel(issueId: string, labelId: string) {
     this.call("addLabel");
     const ticket = this.byId(issueId);
-    const name = this.labelName(labelId);
-    if (!ticket.labelNames.includes(name)) ticket.labelNames.push(name);
+    this.requireLabel(labelId);
+    if (!ticket.labelIds.includes(labelId)) ticket.labelIds.push(labelId);
     this.writes.push(`add label ${ticket.identifier}`);
   }
 
   async removeLabel(issueId: string, labelId: string) {
     this.call("removeLabel");
     const ticket = this.byId(issueId);
-    const name = this.labelName(labelId);
-    ticket.labelNames = ticket.labelNames.filter((n) => n !== name);
+    this.requireLabel(labelId);
+    ticket.labelIds = ticket.labelIds.filter((id) => id !== labelId);
     this.writes.push(`remove label ${ticket.identifier}`);
   }
 
@@ -100,8 +97,9 @@ export class LinearWorkspace implements LinearWorkspaceClient {
     return ticket;
   }
 
-  private labelName(labelId: string): string {
-    for (const [name, id] of this.labels) if (id === labelId) return name;
-    throw new LinearError("api", "Label not found");
+  private requireLabel(labelId: string): void {
+    if (![...this.labels.values()].includes(labelId)) {
+      throw new LinearError("api", "Label not found");
+    }
   }
 }
