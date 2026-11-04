@@ -1,0 +1,18 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "0b5c3e0a-1111-4c55-9a1e-000000000002",
+          "identifier": "TST-2",
+          "url": "https://linear.app/testco/issue/TST-2/fix-the-login-page",
+          "title": "Fix the login page",
+          "trashed": false,
+          "state": { "type": "unstarted" },
+          "labels": { "nodes": [{ "name": "Flow-Focus" }] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": false, "endCursor": "cursor-2" }
+    }
+  }
+}

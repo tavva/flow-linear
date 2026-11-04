@@ -1,0 +1,18 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "0b5c3e0a-1111-4c55-9a1e-000000000003",
+          "identifier": "TST-3",
+          "url": "https://linear.app/testco/issue/TST-3/old-ticket",
+          "title": "Old ticket",
+          "trashed": true,
+          "state": { "type": "canceled" },
+          "labels": { "nodes": [] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": false, "endCursor": null }
+    }
+  }
+}

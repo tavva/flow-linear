@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "message": "Argument Validation Error",
+      "extensions": { "type": "invalid input", "code": "INVALID_INPUT" }
+    }
+  ],
+  "data": null
+}

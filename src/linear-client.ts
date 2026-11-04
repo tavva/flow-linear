@@ -2,6 +2,7 @@
 // ABOUTME: Maps HTTP and GraphQL failures onto a small set of error kinds the sync can act on.
 
 import { requestUrl } from "obsidian";
+import { splitIdentifier } from "./ticket-url";
 
 export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const PAGE_SIZE = 100;
@@ -124,10 +125,9 @@ export class LinearClient implements LinearWorkspaceClient {
 
   getTicketsByIdentifiers(identifiers: string[]): Promise<LinearTicket[]> {
     const conditions = identifiers.flatMap((identifier) => {
-      const dash = identifier.lastIndexOf("-");
-      const number = Number(identifier.slice(dash + 1));
-      if (dash < 1 || !Number.isInteger(number)) return [];
-      return [{ team: { key: { eq: identifier.slice(0, dash) } }, number: { eq: number } }];
+      const parts = splitIdentifier(identifier);
+      if (!parts) return [];
+      return [{ team: { key: { eq: parts.teamKey } }, number: { eq: parts.number } }];
     });
     if (conditions.length === 0) return Promise.resolve([]);
     return this.queryIssues({ or: conditions });
