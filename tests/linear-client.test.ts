@@ -104,6 +104,16 @@ describe("getTicketByIdentifier", () => {
     await expect(client.getTicketByIdentifier("TST-99")).resolves.toBeNull();
   });
 
+  it("trims the project name, as Flow does, and treats a blank one as none", async () => {
+    const issue = JSON.parse(fixture("issue-found"));
+    issue.data.issue.project = { name: "  Launch " };
+    serve([200, JSON.stringify(issue)]);
+    expect((await client.getTicketByIdentifier("TST-2"))?.projectName).toBe("Launch");
+    issue.data.issue.project = { name: "  " };
+    serve([200, JSON.stringify(issue)]);
+    expect((await client.getTicketByIdentifier("TST-2"))?.projectName).toBeNull();
+  });
+
   it("passes on other errors", async () => {
     serve([400, "error-invalid-input"]);
     expect((await linearError(client.getTicketByIdentifier("TST-1"))).kind).toBe("api");

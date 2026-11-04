@@ -109,7 +109,10 @@ hotkey).
 6. The modal shows the title in an editable wording field and the sphere
    (default from the workspace) in a dropdown. Add saves; Escape cancels.
 7. On Add: `api.addFocusItem({ text, sphere, sourceName: "linear",
-sourceLabel: displayName, url: canonicalUrl, externalId: identifier })`.
+sourceLabel: displayName, url: canonicalUrl, externalId: identifier,
+projectName })`, where `projectName` is the ticket's Linear project
+   (`project { name }`, trimmed) or null for none. Flow shows it under the
+   item's wording; Flow builds from before `projectName` drop it.
 
 Pasting a ticket that already has linked items adds another step for it. It
 doesn't replace the existing ones. While a lookup or an add is waiting, a
@@ -167,9 +170,16 @@ Per workspace with a key on this device:
    moved ticket still goes by its old team key and number, so a team key
    reused before that lookup could match a different ticket; that's accepted
    rather than storing ticket UUIDs.
+8. An open ticket whose project differs from its items' `projectName` (it
+   joined, changed or left a project) gets them updated with `projectName`
+   set to the new name, or null to clear it. A move and a project change go
+   in one `updateFocusItem` call. After the first project update the checker
+   reads the item back; if Flow didn't keep the name (a build from before
+   `projectName`), it stops sending project names for the session, so an
+   older Flow isn't rewritten on every check.
 
 A pure function, `planCompletionCheck(itemsByIdentifier, tickets)`, decides
-what to complete and relink and what isn't visible; the `CompletionChecker`
+what to complete and update and what isn't visible; the `CompletionChecker`
 does the reading and writing, and stops between items if Flow unloads.
 
 Completing is idempotent (`completeFocusItem` keeps the first completion

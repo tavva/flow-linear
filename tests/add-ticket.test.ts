@@ -147,6 +147,25 @@ describe("add", () => {
     });
   });
 
+  it("gives the item the ticket's project name, or none", async () => {
+    const { addTicket, linear, focus } = setUp();
+    linear.tickets = [ticket("TST-4", { projectName: "Launch" }), ticket("TST-5")];
+
+    await addTicket.add(
+      await found(addTicket, "https://linear.app/testco/issue/TST-4"),
+      "A",
+      "work"
+    );
+    await addTicket.add(
+      await found(addTicket, "https://linear.app/testco/issue/TST-5"),
+      "B",
+      "work"
+    );
+
+    expect(focus.items[0].external.projectName).toBe("Launch");
+    expect(focus.items[1].external).not.toHaveProperty("projectName");
+  });
+
   it("adds another step for a ticket already in Focus", async () => {
     const { addTicket, linear, focus } = setUp();
     linear.tickets = [ticket("TST-4")];

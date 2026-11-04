@@ -84,7 +84,8 @@ function toTicket(node: TicketNode): LinearTicket {
     title: node.title,
     stateType: node.state?.type ?? "",
     trashed: node.trashed === true,
-    projectName: node.project?.name ?? null,
+    // Flow trims project names, so trimmed here too and compared alike
+    projectName: node.project?.name.trim() || null,
   };
 }
 

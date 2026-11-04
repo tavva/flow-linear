@@ -8,6 +8,7 @@ export interface ExternalSource {
   sourceLabel: string; // Shown as a chip, e.g. "Acme"
   url: string; // Opened when the item is clicked
   externalId: string; // The source's own ID, e.g. "ABC-123"
+  projectName?: string; // The source's project, e.g. "Website relaunch"; shown under the item's wording
 }
 
 export interface ExternalFocusItem {
@@ -28,6 +29,8 @@ export interface NewExternalFocusItem {
   sourceLabel: string;
   url: string;
   externalId: string;
+  // Leave out, or pass null or "", for no project. Since Flow's 6287777; earlier builds drop it
+  projectName?: string | null;
 }
 
 export type ExternalFocusItemChanges = Partial<{
@@ -36,6 +39,7 @@ export type ExternalFocusItemChanges = Partial<{
   sourceLabel: string;
   url: string;
   externalId: string; // Accepted since Flow's 2d771e9; earlier builds ignore it
+  projectName: string | null; // null or "" clears it. Since Flow's 6287777; earlier builds ignore it
 }>;
 
 export type FocusChange =

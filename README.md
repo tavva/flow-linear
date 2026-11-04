@@ -11,7 +11,8 @@ when they're done in Linear.
   items. When a ticket is completed or cancelled in Linear, or deleted (it's in
   Linear's trash), its Focus items are completed. A ticket your key can't see is
   left alone and listed under **Status**. If a ticket moves team, its Focus items
-  are relinked to its new identifier.
+  are relinked to its new identifier. Each item also shows the ticket's Linear
+  project, kept up to date if the ticket changes project.
 
 Flow Linear only reads from Linear. It never changes tickets, labels or anything
 else there.
@@ -67,7 +68,7 @@ using the API keys you enter. It sends requests:
 - every few minutes (5 by default), to check the key's workspace and read the state
   of the tickets behind your unfinished Focus items.
 
-It reads ticket IDs, titles, links and states. It sends no changes to Linear.
+It reads ticket IDs, titles, links, states and project names. It sends no changes to Linear.
 Nothing is sent anywhere else: no telemetry, analytics or ads.
 
 ## What it stores

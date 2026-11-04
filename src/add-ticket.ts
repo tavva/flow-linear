@@ -101,6 +101,7 @@ export class AddTicket {
         sourceLabel: found.workspace.displayName,
         url: found.ticket.url,
         externalId: found.ticket.identifier,
+        projectName: found.ticket.projectName,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -88,7 +88,7 @@ describe("planCompletionCheck", () => {
   it.each(["completed", "canceled"])("completes the items of a %s ticket", (stateType) => {
     expect(plan(ticket("TST-1", { stateType }))).toEqual({
       complete: [{ itemId: item.id, identifier: "TST-1", reason: "closed" }],
-      relink: [],
+      update: [],
       notVisible: [],
     });
   });
@@ -98,7 +98,7 @@ describe("planCompletionCheck", () => {
     (stateType) => {
       expect(plan(ticket("TST-1", { stateType }))).toEqual({
         complete: [],
-        relink: [],
+        update: [],
         notVisible: [],
       });
     }
@@ -112,28 +112,67 @@ describe("planCompletionCheck", () => {
 
   it("never completes the items of a ticket Linear didn't return", () => {
     // The key may not see it: wrong key, a key limited to other teams, or a private team
-    expect(plan(null)).toEqual({ complete: [], relink: [], notVisible: ["TST-1"] });
+    expect(plan(null)).toEqual({ complete: [], update: [], notVisible: ["TST-1"] });
   });
 
   it("relinks the items of an open ticket that now has another identifier", () => {
     const moved = ticket("NEW-7", { url: "https://linear.app/testco/issue/NEW-7/some-title" });
     expect(plan(moved)).toEqual({
       complete: [],
-      relink: [
+      update: [
         {
           itemId: item.id,
-          url: "https://linear.app/testco/issue/NEW-7/some-title",
-          externalId: "NEW-7",
+          changes: {
+            url: "https://linear.app/testco/issue/NEW-7/some-title",
+            externalId: "NEW-7",
+          },
         },
       ],
       notVisible: [],
     });
   });
 
+  it("sets, changes and clears the project name to match the ticket", () => {
+    const inProject = focusItem("TST-1", {
+      external: { ...item.external, projectName: "Old project" },
+    });
+    const plain = focusItem("TST-1");
+    const both = new Map([["TST-1", [inProject, plain]]]);
+
+    expect(
+      planCompletionCheck(both, new Map([["TST-1", ticket("TST-1", { projectName: "Launch" })]]))
+        .update
+    ).toEqual([
+      { itemId: inProject.id, changes: { projectName: "Launch" } },
+      { itemId: plain.id, changes: { projectName: "Launch" } },
+    ]);
+    // Removed from its project: null clears it, and an item with no project is left alone
+    expect(planCompletionCheck(both, new Map([["TST-1", ticket("TST-1")]])).update).toEqual([
+      { itemId: inProject.id, changes: { projectName: null } },
+    ]);
+  });
+
+  it("leaves project names alone when they already match, or when told to", () => {
+    const named = focusItem("TST-1", { external: { ...item.external, projectName: "Launch" } });
+    const tickets = new Map([["TST-1", ticket("TST-1", { projectName: "Launch" })]]);
+    expect(planCompletionCheck(new Map([["TST-1", [named]]]), tickets).update).toEqual([]);
+    expect(planCompletionCheck(items, tickets, { projectNames: false }).update).toEqual([]);
+  });
+
+  it("sends a move and a project change as one update", () => {
+    const moved = ticket("NEW-7", { projectName: "Launch" });
+    expect(plan(moved).update).toEqual([
+      {
+        itemId: item.id,
+        changes: { url: moved.url, externalId: "NEW-7", projectName: "Launch" },
+      },
+    ]);
+  });
+
   it("leaves items whose ticket wasn't looked up", () => {
     expect(planCompletionCheck(items, new Map())).toEqual({
       complete: [],
-      relink: [],
+      update: [],
       notVisible: [],
     });
   });
@@ -266,6 +305,46 @@ describe("CompletionChecker", () => {
     const lookUp = jest.spyOn(d.testco, "getTickets");
     await d.check();
     expect(lookUp).toHaveBeenCalledWith(["NEW-7"]);
+  });
+
+  it("keeps each item's project name in step with its ticket", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { projectName: "Launch" })];
+    d.focus.items = [focusItem("TST-1")];
+
+    await d.check();
+    expect(d.focus.items[0].external.projectName).toBe("Launch");
+
+    d.testco.tickets[0].projectName = "Relaunch";
+    await d.check();
+    expect(d.focus.items[0].external.projectName).toBe("Relaunch");
+
+    d.testco.tickets[0].projectName = null;
+    await d.check();
+    expect(d.focus.items[0].external.projectName).toBeUndefined();
+
+    // Nothing to change: no more writes
+    const writes = d.focus.writes.length;
+    await d.check();
+    expect(d.focus.writes).toHaveLength(writes);
+  });
+
+  it("stops sending project names to a Flow build that drops them", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { projectName: "Launch" })];
+    d.focus.items = [focusItem("TST-1")];
+    // Flow before projectName reads only the fields it knows
+    const update = d.focus.updateFocusItem.bind(d.focus);
+    d.focus.updateFocusItem = (id, { text, sphere, sourceLabel, url, externalId }) =>
+      update(id, { text, sphere, sourceLabel, url, externalId });
+
+    await d.check();
+    await d.check();
+    await d.check();
+
+    // One attempt, then no more writes every check
+    expect(d.focus.writes).toHaveLength(1);
+    expect(d.checker.getStatus("testco").error).toBeUndefined();
   });
 
   it("asks Linear nothing when there are no unfinished linked items", async () => {

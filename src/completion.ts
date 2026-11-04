@@ -1,7 +1,7 @@
 // ABOUTME: Completes Focus items whose Linear tickets are done, cancelled or trashed.
 // ABOUTME: Checks one run at a time, queues a single follow-up, and keeps per-workspace status.
 
-import { ExternalFocusItem, FlowApi, SOURCE_NAME } from "./flow-api";
+import { ExternalFocusItem, ExternalFocusItemChanges, FlowApi, SOURCE_NAME } from "./flow-api";
 import { LinearError, LinearTicket, LinearWorkspaceClient } from "./linear-client";
 import { FlowLinearSettings, WorkspaceSettings } from "./settings";
 import { parseTicketUrl } from "./ticket-url";
@@ -14,16 +14,16 @@ export interface ItemToComplete {
   reason: "closed" | "deleted"; // Deleted means trashed in Linear
 }
 
-export interface ItemToRelink {
+export interface ItemUpdate {
   itemId: string;
-  url: string; // The ticket's link under its current identifier
-  externalId: string; // The ticket's current identifier
+  // A new link and identifier when the ticket moved or its team was renamed, and the ticket's
+  // project name when it differs from the item's (null clears it)
+  changes: ExternalFocusItemChanges;
 }
 
 export interface CompletionPlan {
   complete: ItemToComplete[];
-  // Items linking to an identifier the ticket no longer has (it moved or its team was renamed)
-  relink: ItemToRelink[];
+  update: ItemUpdate[]; // Items of open tickets whose link or project is out of date
   // Identifiers Linear didn't return. The key may not see them, so their items are left alone.
   notVisible: string[];
 }
@@ -50,9 +50,10 @@ export function unfinishedItemsByIdentifier(
  */
 export function planCompletionCheck(
   itemsByIdentifier: Map<string, ExternalFocusItem[]>,
-  tickets: Map<string, LinearTicket | null>
+  tickets: Map<string, LinearTicket | null>,
+  options: { projectNames: boolean } = { projectNames: true }
 ): CompletionPlan {
-  const plan: CompletionPlan = { complete: [], relink: [], notVisible: [] };
+  const plan: CompletionPlan = { complete: [], update: [], notVisible: [] };
   for (const [identifier, items] of itemsByIdentifier) {
     if (!tickets.has(identifier)) continue;
     const ticket = tickets.get(identifier) ?? null;
@@ -67,10 +68,18 @@ export function planCompletionCheck(
         : null;
     if (reason) {
       for (const item of items) plan.complete.push({ itemId: item.id, identifier, reason });
-    } else if (ticket.identifier !== identifier) {
-      for (const item of items) {
-        plan.relink.push({ itemId: item.id, url: ticket.url, externalId: ticket.identifier });
+      continue;
+    }
+    for (const item of items) {
+      const changes: ExternalFocusItemChanges = {};
+      if (ticket.identifier !== identifier) {
+        changes.url = ticket.url;
+        changes.externalId = ticket.identifier;
       }
+      if (options.projectNames && (item.external.projectName ?? null) !== ticket.projectName) {
+        changes.projectName = ticket.projectName;
+      }
+      if (Object.keys(changes).length > 0) plan.update.push({ itemId: item.id, changes });
     }
   }
   return plan;
@@ -117,6 +126,8 @@ export class CompletionChecker {
   private refusedKeys = new Map<string, string>(); // urlKey → the API key Linear refused
   private rateLimitedUntil = new Map<string, number>();
   private stopped = false;
+  // Whether this Flow keeps project names; unknown until the first project name update
+  private projectNamesKept: boolean | undefined = undefined;
   private now: () => number;
 
   constructor(private deps: CompletionCheckerDeps) {
@@ -191,7 +202,9 @@ export class CompletionChecker {
         if (organization.urlKey !== urlKey) {
           throw new WrongWorkspaceError(wrongWorkspaceMessage(workspace, organization.urlKey));
         }
-        const plan = planCompletionCheck(items, await client.getTickets([...items.keys()]));
+        const plan = planCompletionCheck(items, await client.getTickets([...items.keys()]), {
+          projectNames: this.projectNamesKept !== false,
+        });
         notVisible = plan.notVisible;
         if (notVisible.length > 0) {
           this.notifyOnce(
@@ -238,11 +251,14 @@ export class CompletionChecker {
       }
     };
 
-    for (const { itemId, url, externalId } of plan.relink) {
+    for (const { itemId, changes } of plan.update) {
       if (!this.stillConnected(api)) return;
-      // Flow builds from before externalId could be changed ignore it and update only the
-      // link, which is what later checks read
-      await attempt(itemId, () => api.updateFocusItem(itemId, { url, externalId }));
+      // Flow builds from before externalId or projectName could be changed ignore those
+      // fields. The link still updates, which is what later checks read.
+      const updated = await attempt(itemId, () => api.updateFocusItem(itemId, changes));
+      if (updated && changes.projectName !== undefined) {
+        await this.checkProjectNameKept(api, itemId, changes.projectName);
+      }
     }
     for (const { itemId, identifier, reason } of plan.complete) {
       if (!this.stillConnected(api)) return;
@@ -254,6 +270,20 @@ export class CompletionChecker {
       }
     }
     if (failures.length > 0) throw failures[0];
+  }
+
+  /**
+   * A Flow build that drops projectName would make every check try to set it again, so after
+   * the first such update read the item back and stop sending project names if it didn't stick.
+   */
+  private async checkProjectNameKept(
+    api: FlowApi,
+    itemId: string,
+    projectName: string | null
+  ): Promise<void> {
+    if (this.projectNamesKept !== undefined) return;
+    const item = (await api.getFocusItems(SOURCE_NAME)).find((entry) => entry.id === itemId);
+    if (item) this.projectNamesKept = (item.external.projectName ?? null) === projectName;
   }
 
   private handleError(workspace: WorkspaceSettings, apiKey: string, error: unknown): void {

@@ -39,6 +39,7 @@ export class FocusStore implements FlowApi {
           sourceLabel: input.sourceLabel,
           url: input.url,
           externalId: input.externalId,
+          ...(input.projectName ? { projectName: input.projectName } : {}),
         },
       },
     ]);
@@ -51,16 +52,22 @@ export class FocusStore implements FlowApi {
       (items) =>
         items.map((item) => {
           if (item.id !== id) return item;
+          const external = {
+            ...item.external,
+            sourceLabel: changes.sourceLabel ?? item.external.sourceLabel,
+            url: changes.url ?? item.external.url,
+            externalId: changes.externalId ?? item.external.externalId,
+          };
+          // null or an empty string clears the project name, as in Flow
+          if (changes.projectName !== undefined) {
+            if (changes.projectName) external.projectName = changes.projectName;
+            else delete external.projectName;
+          }
           return {
             ...item,
             text: changes.text ?? item.text,
             sphere: changes.sphere ?? item.sphere,
-            external: {
-              ...item.external,
-              sourceLabel: changes.sourceLabel ?? item.external.sourceLabel,
-              url: changes.url ?? item.external.url,
-              externalId: changes.externalId ?? item.external.externalId,
-            },
+            external,
           };
         }),
       id
