@@ -149,10 +149,14 @@ Per workspace with a key on this device:
    ("2 tickets not visible with this key: ABC-12, ABC-40") and in one notice
    per session.
 7. An open ticket whose identifier has changed (it moved, or its team key was
-   renamed) gets its items relinked with `updateFocusItem(id, { url })`, so
-   later checks look it up by its current identifier, and a team key reused
-   later can't match a different ticket. Flow's API can't change
-   `externalId`, so the chip keeps the old identifier until Flow allows it.
+   renamed) gets its items relinked with `updateFocusItem(id, { url,
+   externalId })`, so later checks look it up by its current identifier, the
+   chip shows it, and a team key reused later can't match a different ticket.
+   Flow builds from before `externalId` could be changed ignore that field and
+   update only the link, which is what checks read. The first lookup of a
+   moved ticket still goes by its old team key and number, so a team key
+   reused before that lookup could match a different ticket; that's accepted
+   rather than storing ticket UUIDs.
 
 A pure function, `planCompletionCheck(itemsByIdentifier, tickets)`, decides
 what to complete and relink and what isn't visible; the `CompletionChecker`

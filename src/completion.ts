@@ -17,6 +17,7 @@ export interface ItemToComplete {
 export interface ItemToRelink {
   itemId: string;
   url: string; // The ticket's link under its current identifier
+  externalId: string; // The ticket's current identifier
 }
 
 export interface CompletionPlan {
@@ -67,7 +68,9 @@ export function planCompletionCheck(
     if (reason) {
       for (const item of items) plan.complete.push({ itemId: item.id, identifier, reason });
     } else if (ticket.identifier !== identifier) {
-      for (const item of items) plan.relink.push({ itemId: item.id, url: ticket.url });
+      for (const item of items) {
+        plan.relink.push({ itemId: item.id, url: ticket.url, externalId: ticket.identifier });
+      }
     }
   }
   return plan;
@@ -235,9 +238,11 @@ export class CompletionChecker {
       }
     };
 
-    for (const { itemId, url } of plan.relink) {
+    for (const { itemId, url, externalId } of plan.relink) {
       if (!this.stillConnected(api)) return;
-      await attempt(itemId, () => api.updateFocusItem(itemId, { url }));
+      // Flow builds from before externalId could be changed ignore it and update only the
+      // link, which is what later checks read
+      await attempt(itemId, () => api.updateFocusItem(itemId, { url, externalId }));
     }
     for (const { itemId, identifier, reason } of plan.complete) {
       if (!this.stillConnected(api)) return;

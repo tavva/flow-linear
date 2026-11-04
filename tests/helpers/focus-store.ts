@@ -59,6 +59,7 @@ export class FocusStore implements FlowApi {
               ...item.external,
               sourceLabel: changes.sourceLabel ?? item.external.sourceLabel,
               url: changes.url ?? item.external.url,
+              externalId: changes.externalId ?? item.external.externalId,
             },
           };
         }),

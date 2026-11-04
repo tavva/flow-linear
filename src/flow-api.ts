@@ -35,6 +35,7 @@ export type ExternalFocusItemChanges = Partial<{
   sphere: string;
   sourceLabel: string;
   url: string;
+  externalId: string; // Accepted since Flow's 2d771e9; earlier builds ignore it
 }>;
 
 export type FocusChange =

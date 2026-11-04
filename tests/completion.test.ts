@@ -119,7 +119,13 @@ describe("planCompletionCheck", () => {
     const moved = ticket("NEW-7", { url: "https://linear.app/testco/issue/NEW-7/some-title" });
     expect(plan(moved)).toEqual({
       complete: [],
-      relink: [{ itemId: item.id, url: "https://linear.app/testco/issue/NEW-7/some-title" }],
+      relink: [
+        {
+          itemId: item.id,
+          url: "https://linear.app/testco/issue/NEW-7/some-title",
+          externalId: "NEW-7",
+        },
+      ],
       notVisible: [],
     });
   });
@@ -228,6 +234,7 @@ describe("CompletionChecker", () => {
 
     expect(d.focus.writes).toEqual([`update ${item.id}`]);
     expect(d.focus.items[0].external.url).toBe("https://linear.app/testco/issue/NEW-7/some-title");
+    expect(d.focus.items[0].external.externalId).toBe("NEW-7");
     expect(d.focus.items[0].completedAt).toBeUndefined();
 
     // A different ticket now has the old identifier; it mustn't be taken for this one
@@ -238,6 +245,27 @@ describe("CompletionChecker", () => {
 
     expect(lookUp).toHaveBeenCalledWith(["NEW-7"]);
     expect(d.focus.items[0].completedAt).toBeUndefined();
+  });
+
+  it("still relinks with a Flow build that ignores externalId", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("NEW-7", { id: "uuid-moved" })];
+    d.testco.oldIdentifiers.set("TST-1", "uuid-moved");
+    d.focus.items = [focusItem("TST-1")];
+    // Flow before externalId could be changed reads only the fields it knows
+    const update = d.focus.updateFocusItem.bind(d.focus);
+    d.focus.updateFocusItem = (id, { text, sphere, sourceLabel, url }) =>
+      update(id, { text, sphere, sourceLabel, url });
+
+    await d.check();
+    expect(d.focus.items[0].external.url).toBe("https://linear.app/testco/issue/NEW-7/some-title");
+    expect(d.focus.items[0].external.externalId).toBe("TST-1");
+    expect(d.checker.getStatus("testco").error).toBeUndefined();
+
+    // Later checks go by the link, so they find the ticket under its new identifier
+    const lookUp = jest.spyOn(d.testco, "getTickets");
+    await d.check();
+    expect(lookUp).toHaveBeenCalledWith(["NEW-7"]);
   });
 
   it("asks Linear nothing when there are no unfinished linked items", async () => {
