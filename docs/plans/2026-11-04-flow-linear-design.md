@@ -170,8 +170,18 @@ Per workspace with a key on this device:
    one that turns up again rejoins the batch. Any other error, or an empty
    answer with no error, fails the whole check. (An `issues(filter: { or:
    [{ team: { key }, number }] })` batch was tried first: Linear ignores
-   those conditions and returns unrelated issues.) A ticket in a team the key
-   can't see wasn't probed; it's assumed to give the same not-found error.
+   those conditions and returns unrelated issues.)
+
+   Confirmed with `scripts/probe-linear.mjs` against Acme, with a
+   Read-only key, on 1eed7b0: the Read key can query `viewer { organization
+   }`; a batch with one missing ticket gives HTTP 200, `data: null` and one
+   `INPUT_ERROR` "Entity not found: Issue" error at `path: ["t1"]`; asked
+   alone, an existing ticket comes back (started), a missing one gives
+   `data: null` with that error, a trashed one comes back with `trashed:
+   true`, a moved one's old identifier (OLD-1) returns it under its new
+   identifier (NEW-1) and URL, and `project { name }` returns the
+   project's name. Not probed: a ticket in a team the key can't see, which is
+   assumed to give the same not-found error.
 5. For each ticket whose state type is `completed` or `canceled`, or which is
    trashed, call `completeFocusItem` on each of its unfinished items. A
    trashed ticket is logged with `console.warn` once its item is completed.
