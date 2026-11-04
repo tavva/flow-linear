@@ -1,0 +1,21 @@
+/* ABOUTME: Styles for Flow Linear's modals. */
+/* ABOUTME: Every class is prefixed flow-linear- so nothing leaks into other plugins. */
+
+.flow-linear-error {
+  color: var(--text-error);
+  min-height: var(--line-height-normal);
+  margin-bottom: var(--size-4-2);
+}
+
+.flow-linear-error:empty {
+  display: none;
+}
+
+.flow-linear-ticket {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.flow-linear-wording {
+  width: 100%;
+}

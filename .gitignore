@@ -1,1 +1,8 @@
 .env.*
+node_modules/
+main.js
+*.js.map
+coverage/
+data.json
+.worktrees/
+.DS_Store

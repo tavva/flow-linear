@@ -1,0 +1,8 @@
+node_modules/
+main.js
+*.js.map
+coverage/
+docs/
+manifest.json
+versions.json
+package-lock.json
