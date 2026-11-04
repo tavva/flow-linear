@@ -158,14 +158,20 @@ Per workspace with a key on this device:
    Identifiers go in as variables, and only ones matching
    `/^[A-Z][A-Z0-9]*-\d+$/` are asked for. `issue(id:)` accepts the identifier
    a ticket had before it moved team, and returns trashed tickets with
-   `trashed: true`. A missing ticket comes back as HTTP 200 with that alias
-   null and an error whose `path[0]` names the alias, message "Entity not
-   found: Issue", code `INPUT_ERROR`; that alias counts as not visible. Any
-   other error, an error without a path, or an alias that is null with no
-   error fails the whole check. (An `issues(filter: { or: [{ team: { key },
-   number }] })` batch was tried first: Linear ignores those conditions and
-   returns unrelated issues.) A ticket in a team the key can't see wasn't
-   probed; it's assumed to give the same not-found error.
+   `trashed: true`. A missing ticket comes back as HTTP 200 with an error
+   whose `path[0]` names its alias, message "Entity not found: Issue", code
+   `INPUT_ERROR`. `issue` is non-null in Linear's schema, so that error nulls
+   the whole answer: every ticket in the request comes back empty. So when a
+   request fails only with not-found errors, its tickets are asked for one by
+   one, which tells found tickets from missing ones; a missing one counts as
+   not visible. Missing identifiers are remembered for the session (one
+   client per key) and always asked for on their own after that, so one
+   missing ticket costs one extra request rather than breaking the batch;
+   one that turns up again rejoins the batch. Any other error, or an empty
+   answer with no error, fails the whole check. (An `issues(filter: { or:
+   [{ team: { key }, number }] })` batch was tried first: Linear ignores
+   those conditions and returns unrelated issues.) A ticket in a team the key
+   can't see wasn't probed; it's assumed to give the same not-found error.
 5. For each ticket whose state type is `completed` or `canceled`, or which is
    trashed, call `completeFocusItem` on each of its unfinished items. A
    trashed ticket is logged with `console.warn` once its item is completed.

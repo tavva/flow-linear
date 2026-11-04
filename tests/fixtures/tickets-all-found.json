@@ -1,0 +1,50 @@
+{
+  "data": {
+    "t0": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000001",
+      "identifier": "TST-1",
+      "url": "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
+      "title": "Write the onboarding guide",
+      "trashed": false,
+      "state": {
+        "type": "started"
+      },
+      "project": {
+        "name": "Onboarding"
+      }
+    },
+    "t1": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000002",
+      "identifier": "TST-2",
+      "url": "https://linear.app/testco/issue/TST-2/fix-the-login-page",
+      "title": "Fix the login page",
+      "trashed": false,
+      "state": {
+        "type": "unstarted"
+      },
+      "project": null
+    },
+    "t2": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000003",
+      "identifier": "TST-3",
+      "url": "https://linear.app/testco/issue/TST-3/old-ticket",
+      "title": "Old ticket",
+      "trashed": true,
+      "state": {
+        "type": "unstarted"
+      },
+      "project": null
+    },
+    "t3": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000004",
+      "identifier": "TST-1131",
+      "url": "https://linear.app/testco/issue/TST-1131/moved-ticket",
+      "title": "Moved ticket",
+      "trashed": false,
+      "state": {
+        "type": "completed"
+      },
+      "project": null
+    }
+  }
+}

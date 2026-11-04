@@ -37,6 +37,7 @@ export default class FlowLinearPlugin extends Plugin {
   private startupTimer: number | null = null;
   private checksAllowed = false;
   private warnedAboutVersion = false;
+  private clients = new Map<string, LinearClient>();
 
   async onload(): Promise<void> {
     this.settings = readSettings(await this.loadData());
@@ -119,8 +120,14 @@ export default class FlowLinearPlugin extends Plugin {
     this.requestCheck();
   }
 
+  /** One client per key for the session, so what it learns about missing tickets is kept. */
   createClient(apiKey: string): LinearWorkspaceClient {
-    return new LinearClient(apiKey);
+    let client = this.clients.get(apiKey);
+    if (!client) {
+      client = new LinearClient(apiKey);
+      this.clients.set(apiKey, client);
+    }
+    return client;
   }
 
   async saveSettings(): Promise<void> {

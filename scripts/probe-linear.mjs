@@ -105,16 +105,29 @@ async function main() {
     tickets.map(({ identifier }, index) => [`i${index}`, identifier])
   );
   const answer = await send(apiKey, QUERIES.tickets(tickets.length), variables);
-  report(
-    "tickets: one aliased issue(id:) per identifier",
-    answer,
-    Object.fromEntries(
+  report("tickets: one aliased issue(id:) per identifier", answer, {
+    rawData: answer.body?.data === null ? null : typeof answer.body?.data,
+    aliases: Object.fromEntries(
       tickets.map(({ role, identifier }, index) => [
         `t${index} ${role} ${identifier}`,
         describeTicket(answer.body?.data?.[`t${index}`] ?? null),
       ])
-    )
-  );
+    ),
+  });
+
+  // As the plugin does when a batch fails only with not-found errors: one request per ticket
+  for (const { role, identifier } of tickets) {
+    const single = await send(apiKey, QUERIES.tickets(1), { i0: identifier });
+    const node = single.body?.data?.t0 ?? null;
+    const notFound = (single.body?.errors ?? []).every((error) =>
+      /entity not found/i.test(error.message ?? "")
+    );
+    report(`alone: ${role} ${identifier}`, single, {
+      rawData: single.body?.data === null ? null : typeof single.body?.data,
+      verdict: node ? "ticket" : notFound ? "not visible" : "error",
+      ticket: describeTicket(node),
+    });
+  }
 }
 
 main().catch((error) => {

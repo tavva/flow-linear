@@ -128,6 +128,9 @@ function withTimeout<T>(request: Promise<T>): Promise<T> {
 }
 
 export class LinearClient implements LinearWorkspaceClient {
+  // Identifiers Linear didn't find; asked for one at a time until they turn up again
+  private notVisible = new Set<string>();
+
   constructor(private apiKey: string) {}
 
   async getOrganization(): Promise<LinearOrganization> {
@@ -141,39 +144,67 @@ export class LinearClient implements LinearWorkspaceClient {
     return (await this.getTickets([identifier])).get(identifier) ?? null;
   }
 
+  /**
+   * Looks tickets up BATCH_SIZE to a request, one aliased issue(id:) each. issue(id:) is
+   * non-null in Linear's schema, so one ticket that isn't found nulls the whole answer. When a
+   * request fails only with "not found" errors, its tickets are asked for one by one to tell
+   * which. Tickets found missing are remembered for this client's life and then always asked
+   * for on their own, so they can't spoil a batch again.
+   */
   async getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>> {
     const unique = [...new Set(identifiers)].filter((identifier) => IDENTIFIER.test(identifier));
     const results = new Map<string, LinearTicket | null>();
-    for (let start = 0; start < unique.length; start += BATCH_SIZE) {
-      const batch = unique.slice(start, start + BATCH_SIZE);
-      const variables = Object.fromEntries(
-        batch.map((identifier, index) => [`i${index}`, identifier])
-      );
-      const { data, errors } = await this.request<Record<string, TicketNode | null>>(
-        QUERIES.tickets(batch.length),
-        variables
-      );
+    const batched = unique.filter((identifier) => !this.notVisible.has(identifier));
+    const alone = unique.filter((identifier) => this.notVisible.has(identifier));
 
-      // Each "not found" names its alias in its path. Anything else fails the whole check.
-      const notFound = new Set<string>();
-      const otherErrors = errors.filter((error) => {
-        const alias = error.path?.[0];
-        if (typeof alias === "string" && isNotFound(error)) {
-          notFound.add(alias);
-          return false;
-        }
-        return true;
-      });
-      if (otherErrors.length > 0) throw errorFromGraphql(otherErrors);
-
-      batch.forEach((identifier, index) => {
-        const node = data?.[`t${index}`];
-        if (node) results.set(identifier, toTicket(node));
-        else if (notFound.has(`t${index}`)) results.set(identifier, null);
-        else throw new LinearError("api", `Linear gave no answer for ${identifier}`);
-      });
+    for (let start = 0; start < batched.length; start += BATCH_SIZE) {
+      const batch = batched.slice(start, start + BATCH_SIZE);
+      const answer = await this.askFor(batch);
+      if (answer.kind === "found") {
+        for (const [identifier, ticket] of answer.tickets) results.set(identifier, ticket);
+      } else if (batch.length === 1) {
+        // Asked alone already, so it's this one that wasn't found
+        results.set(batch[0], null);
+        this.notVisible.add(batch[0]);
+      } else {
+        alone.push(...batch);
+      }
+    }
+    for (const identifier of alone) {
+      const answer = await this.askFor([identifier]);
+      const ticket = answer.kind === "found" ? (answer.tickets.get(identifier) ?? null) : null;
+      results.set(identifier, ticket);
+      if (ticket) this.notVisible.delete(identifier);
+      else this.notVisible.add(identifier);
     }
     return results;
+  }
+
+  /**
+   * One request for these tickets: every one found, or "not-found" when the only errors are
+   * Linear's entity-not-found. Any other error, or a missing answer with no error, throws.
+   */
+  private async askFor(
+    batch: string[]
+  ): Promise<{ kind: "found"; tickets: Map<string, LinearTicket> } | { kind: "not-found" }> {
+    const variables = Object.fromEntries(
+      batch.map((identifier, index) => [`i${index}`, identifier])
+    );
+    const { data, errors } = await this.request<Record<string, TicketNode | null>>(
+      QUERIES.tickets(batch.length),
+      variables
+    );
+    if (errors.length > 0) {
+      if (errors.every(isNotFound)) return { kind: "not-found" };
+      throw errorFromGraphql(errors.filter((error) => !isNotFound(error)));
+    }
+    const tickets = new Map<string, LinearTicket>();
+    batch.forEach((identifier, index) => {
+      const node = data?.[`t${index}`];
+      if (!node) throw new LinearError("api", `Linear gave no answer for ${identifier}`);
+      tickets.set(identifier, toTicket(node));
+    });
+    return { kind: "found", tickets };
   }
 
   private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {

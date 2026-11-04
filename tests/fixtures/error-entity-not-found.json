@@ -3,7 +3,12 @@
     {
       "message": "Entity not found: Issue",
       "path": ["t0"],
-      "locations": [{ "line": 1, "column": 24 }],
+      "locations": [
+        {
+          "line": 1,
+          "column": 24
+        }
+      ],
       "extensions": {
         "type": "invalid input",
         "code": "INPUT_ERROR",
@@ -13,5 +18,5 @@
       }
     }
   ],
-  "data": { "t0": null }
+  "data": null
 }
