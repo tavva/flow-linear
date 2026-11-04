@@ -1,5 +1,5 @@
-// ABOUTME: Tests for production release script version parsing and calculation.
-// ABOUTME: Validates version bumping logic for patch, minor, and major releases.
+// ABOUTME: Tests for the production release script: versions, arguments and git steps.
+// ABOUTME: Git is replaced by a recorder, so no test touches the repository.
 
 import {
   parseVersion,
@@ -8,6 +8,7 @@ import {
   buildGitHubReleaseCreateArgs,
   buildReleaseTagCommands,
   parseReleaseArgs,
+  commitAndPush,
 } from "../scripts/release";
 
 describe("parseVersion", () => {
@@ -120,5 +121,64 @@ describe("parseReleaseArgs", () => {
 
   test("rejects unknown options", () => {
     expect(() => parseReleaseArgs(["--yes"])).toThrow("Unknown option: --yes");
+  });
+});
+
+describe("commitAndPush", () => {
+  const files = ["package.json", "manifest.json", "versions.json"];
+
+  /** Records each git call and answers with the status given for its first argument. */
+  function fakeGit(statuses: Record<string, number> = {}) {
+    const calls: string[][] = [];
+    const git = (args: string[]) => {
+      calls.push(args);
+      return statuses[args[0]] ?? 0;
+    };
+    return { git, calls };
+  }
+
+  beforeEach(() => {
+    jest.spyOn(console, "log").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("commits the version files and pushes", () => {
+    const { git, calls } = fakeGit({ diff: 1 });
+    expect(commitAndPush("0.1.0", git)).toBe(true);
+    expect(calls).toEqual([
+      ["add", ...files],
+      ["diff", "--cached", "--quiet", "--", ...files],
+      ["commit", "-m", "Release v0.1.0"],
+      ["push"],
+    ]);
+  });
+
+  it("skips the commit when the version files already hold the version, and still pushes", () => {
+    const { git, calls } = fakeGit({ diff: 0 });
+    expect(commitAndPush("0.1.0", git)).toBe(true);
+    expect(calls).toEqual([
+      ["add", ...files],
+      ["diff", "--cached", "--quiet", "--", ...files],
+      ["push"],
+    ]);
+    expect(console.log).toHaveBeenCalledWith(
+      "Version files already say 0.1.0; nothing to commit, so skipping the commit"
+    );
+  });
+
+  it.each([
+    ["add", { add: 128 }],
+    ["diff", { diff: 128 }],
+    ["commit", { diff: 1, commit: 1 }],
+    ["push", { diff: 1, push: 1 }],
+  ])("stops when git %s fails", (step, statuses) => {
+    const { git, calls } = fakeGit(statuses);
+    expect(commitAndPush("0.1.0", git)).toBe(false);
+    expect(calls[calls.length - 1][0]).toBe(step);
+    expect(console.error).toHaveBeenCalledWith(`\nError during git operations: git ${step} failed`);
   });
 });

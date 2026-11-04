@@ -435,27 +435,43 @@ export function confirmRelease(version: string, releaseNotes: string): Promise<b
   });
 }
 
+const VERSION_FILES = ["package.json", "manifest.json", "versions.json"];
+
+/** Runs git with the given arguments and returns its exit status. */
+export type GitRunner = (args: string[]) => number;
+
+export function runGit(args: string[]): number {
+  return spawnSync("git", args, { stdio: "inherit" }).status ?? 1;
+}
+
 /**
- * Commits changes and pushes
+ * Commits the version files and pushes. When they already hold the requested version (as
+ * when an earlier run stopped after committing, or they were set by hand), there's nothing to
+ * commit: that step is skipped and the push goes ahead. Any git failure stops the release.
  */
-export function commitAndPush(version: string): boolean {
+export function commitAndPush(version: string, git: GitRunner = runGit): boolean {
   console.log("Committing and pushing...\n");
 
-  try {
-    execFileSync("git", ["add", "package.json", "manifest.json", "versions.json"], {
-      stdio: "inherit",
-    });
-    execFileSync("git", ["commit", "-m", `Release v${version}`], {
-      stdio: "inherit",
-    });
-    execFileSync("git", ["push"], { stdio: "inherit" });
-    console.log("\n✓ Changes committed and pushed\n");
-    return true;
-  } catch (error) {
-    console.error("\nError during git operations");
-    console.error(error instanceof Error ? error.message : String(error));
+  const fail = (step: string): boolean => {
+    console.error(`\nError during git operations: ${step} failed`);
     return false;
+  };
+
+  if (git(["add", ...VERSION_FILES]) !== 0) return fail("git add");
+
+  // Exit status 0: nothing staged; 1: changes staged; anything else: git failed
+  const staged = git(["diff", "--cached", "--quiet", "--", ...VERSION_FILES]);
+  if (staged === 0) {
+    console.log(`Version files already say ${version}; nothing to commit, so skipping the commit`);
+  } else if (staged === 1) {
+    if (git(["commit", "-m", `Release v${version}`]) !== 0) return fail("git commit");
+  } else {
+    return fail("git diff");
   }
+
+  if (git(["push"]) !== 0) return fail("git push");
+  console.log("\n✓ Release commit pushed\n");
+  return true;
 }
 
 export function buildReleaseTagCommands(version: string): string[][] {
