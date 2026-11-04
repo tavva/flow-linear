@@ -20,6 +20,9 @@ export type LabelState = "synced" | "add-pending" | "remove-pending";
 export interface TicketRecord {
   issueId: string; // Linear UUID, needed by the label mutations
   label: LabelState;
+  // Set when the label name was changed in settings: the old label this record is about, which
+  // comes off before the new one goes on. Absent means the current label name.
+  labelName?: string;
 }
 
 export interface FlowLinearData {
@@ -62,10 +65,12 @@ function readWorkspace(value: unknown): WorkspaceSettings | null {
 
 function readTicketRecord(value: unknown): TicketRecord | null {
   if (!isRecord(value)) return null;
-  const { issueId, label } = value;
+  const { issueId, label, labelName } = value;
   if (!isString(issueId) || issueId === "") return null;
   if (label !== "synced" && label !== "add-pending" && label !== "remove-pending") return null;
-  return { issueId, label };
+  return isString(labelName) && labelName !== ""
+    ? { issueId, label, labelName }
+    : { issueId, label };
 }
 
 /** Read stored data, dropping anything malformed and filling in defaults. */

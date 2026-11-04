@@ -4,11 +4,13 @@
 import { FlowApi, SOURCE_NAME, ExternalFocusItem } from "./flow-api";
 import { LinearError, LinearWorkspaceClient } from "./linear-client";
 import { FlowLinearData, TicketRecord, WorkspaceSettings } from "./settings";
-import { decideSyncActions, itemTicketKey, SyncAction } from "./sync-decisions";
+import { confirmationKey, decideSyncActions, itemTicketKey, SyncAction } from "./sync-decisions";
 
-// How long Focus must keep lacking a ticket's items before its label comes off. Covers sync
-// glitches that briefly empty the focus file, and older Flow versions that drop external items.
-export const REMOVAL_CONFIRM_DELAY_MS = 30_000;
+// How long a change that rests on this device's focus file waits for a later pass to confirm
+// it. Covers sync glitches that briefly empty the file, and a file that is still catching up
+// with other devices. It can't help against Flow 1.3.12 and earlier, which delete external
+// items for good.
+export const CONFIRM_DELAY_MS = 30_000;
 
 export interface WorkspaceStatus {
   lastSuccessAt?: number;
@@ -19,24 +21,45 @@ export interface SyncRunnerDeps {
   getFlowApi(): FlowApi | null;
   getData(): FlowLinearData;
   saveData(): Promise<void>;
+  // Bumped whenever settings change in a way that makes records from before it stale
+  getSettingsGeneration(): number;
+  // This device's own state, kept out of the synced data.json
+  loadLocal(): unknown;
+  saveLocal(value: unknown): void;
   getSecret(name: string): string | null;
   createClient(apiKey: string): LinearWorkspaceClient;
   notify(message: string): void;
-  // Run a callback later; used to come back and confirm a label removal
+  // Run a callback later; used to come back and confirm a change
   schedule(callback: () => void, delayMs: number): void;
   now?: () => number;
-  removalConfirmDelayMs?: number;
+  confirmDelayMs?: number;
 }
 
 export const NO_KEY_STATUS = "No API key on this device";
 
-function splitCandidate(candidate: string): [string, string] {
-  const split = candidate.indexOf("\n");
-  return [candidate.slice(0, split), candidate.slice(split + 1)];
+/** A problem with the workspace's set-up that the user has to fix; the workspace is skipped. */
+export class WorkspacePausedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspacePausedError";
+  }
 }
+
+// Settings changed during the pass; its records may be stale, so it stops and runs again
+class SettingsChangedError extends Error {}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readSeen(value: unknown): Set<string> {
+  return new Set(
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []
+  );
+}
+
+function candidateTicketKey(candidate: string): string {
+  return candidate.slice(candidate.indexOf("\n") + 1);
 }
 
 export class SyncRunner {
@@ -47,15 +70,19 @@ export class SyncRunner {
   private refusedKeys = new Map<string, string>(); // urlKey → the API key Linear refused
   private rateLimitedUntil = new Map<string, number>();
   private labelIds = new Map<string, string>(); // "<urlKey>\n<label name>" → label id
-  // "<add|remove>\n<ticket key>" → when a pass first awaited that change
+  // Awaited changes (confirmationKey) → when a pass first awaited them
   private candidates = new Map<string, number>();
+  // Ticket keys this device has seen with unfinished items, kept in local storage
+  private seenUnfinished: Set<string>;
+  private followUpScheduled = false;
   private stopped = false;
   private now: () => number;
   private confirmDelayMs: number;
 
   constructor(private deps: SyncRunnerDeps) {
     this.now = deps.now ?? (() => Date.now());
-    this.confirmDelayMs = deps.removalConfirmDelayMs ?? REMOVAL_CONFIRM_DELAY_MS;
+    this.confirmDelayMs = deps.confirmDelayMs ?? CONFIRM_DELAY_MS;
+    this.seenUnfinished = readSeen(deps.loadLocal());
   }
 
   /** Start a sync, or queue one follow-up if a sync is running. Resolves when both are done. */
@@ -67,17 +94,28 @@ export class SyncRunner {
     }
     this.running = this.runUntilSettled().finally(() => {
       this.running = null;
+      // A request that arrived after the last check of `queued` would otherwise be lost
+      if (this.queued && !this.stopped) {
+        this.requestSync().catch((error) => console.error("Flow Linear sync failed", error));
+      }
     });
     return this.running;
   }
 
-  /** Stop at the next step and start no more runs. Called when the plugin unloads. */
+  /** Stop at the next step, save nothing more and start no more runs. Called on unload. */
   stop(): void {
     this.stopped = true;
   }
 
   getStatus(urlKey: string): WorkspaceStatus {
     return this.statuses.get(urlKey) ?? {};
+  }
+
+  /** Note that this device has an unfinished item for the ticket, as after adding one. */
+  markSeenUnfinished(ticketKey: string): void {
+    if (this.seenUnfinished.has(ticketKey)) return;
+    this.seenUnfinished.add(ticketKey);
+    this.deps.saveLocal([...this.seenUnfinished]);
   }
 
   private async runUntilSettled(): Promise<void> {
@@ -92,7 +130,7 @@ export class SyncRunner {
     if (!api) return;
     // A copy, so removing a workspace mid-run doesn't skip another
     for (const workspace of [...this.deps.getData().settings.workspaces]) {
-      if (this.stopped) return;
+      if (this.stopped || this.deps.getFlowApi() !== api) return;
       await this.syncWorkspace(api, workspace);
     }
   }
@@ -107,12 +145,19 @@ export class SyncRunner {
     if (this.refusedKeys.get(urlKey) === apiKey) return;
     if ((this.rateLimitedUntil.get(urlKey) ?? 0) > this.now()) return;
 
+    const generation = this.deps.getSettingsGeneration();
     try {
       const client = this.deps.createClient(apiKey);
-      await this.syncWithClient(api, workspace, client);
+      await this.syncWithClient(api, workspace, client, generation);
       this.refusedKeys.delete(urlKey);
       this.statuses.set(urlKey, { lastSuccessAt: this.now() });
     } catch (error) {
+      if (error instanceof SettingsChangedError) {
+        this.queued = true;
+        return;
+      }
+      // Flow unloaded mid-pass and its API now refuses writes; it will be found again
+      if (this.deps.getFlowApi() !== api || this.stopped) return;
       this.handleError(workspace, apiKey, error);
     }
   }
@@ -120,19 +165,36 @@ export class SyncRunner {
   private async syncWithClient(
     api: FlowApi,
     workspace: WorkspaceSettings,
-    client: LinearWorkspaceClient
+    client: LinearWorkspaceClient,
+    generation: number
   ): Promise<void> {
     const data = this.deps.getData();
+    const { labelName } = data.settings;
     const prefix = `${workspace.urlKey}/`;
     const records = Object.fromEntries(
       Object.entries(data.tickets).filter(([key]) => key.startsWith(prefix))
     );
 
     let actions: SyncAction[];
+    let focusItems: ExternalFocusItem[];
     try {
-      const focusItems = (await api.getFocusItems(SOURCE_NAME)).filter((item) =>
+      focusItems = (await api.getFocusItems(SOURCE_NAME)).filter((item) =>
         itemTicketKey(item)?.startsWith(prefix)
       );
+      const labelId = await this.findLabelId(workspace, client);
+      if (!labelId) await this.checkMissingLabel(workspace, client, records);
+
+      const retiredLabelIds = new Map<string, string | null>();
+      for (const record of Object.values(records)) {
+        const name = record.labelName?.toLowerCase();
+        if (name && name !== labelName.toLowerCase() && !retiredLabelIds.has(name)) {
+          retiredLabelIds.set(name, await client.findWorkspaceLabel(name));
+        }
+      }
+      const reportLabelIds = [labelId, ...retiredLabelIds.values()].filter(
+        (id): id is string => id !== null
+      );
+
       const untrackedIdentifiers = [
         ...new Set(
           focusItems
@@ -141,23 +203,33 @@ export class SyncRunner {
             .map((key) => key.slice(prefix.length))
         ),
       ];
-
-      const labelId = await this.findLabelId(workspace, client);
-      const labelledTickets = labelId ? await client.getLabelledTickets(labelId) : [];
-      const trackedTickets = [
-        ...(await client.getTicketsByIds(Object.values(records).map((r) => r.issueId))),
-        ...(await client.getTicketsByIdentifiers(untrackedIdentifiers)),
-      ];
+      const labelledTickets = labelId
+        ? await client.getLabelledTickets(labelId, reportLabelIds)
+        : [];
+      const trackedTickets = await client.getTicketsByIds(
+        Object.values(records).map((r) => r.issueId),
+        reportLabelIds
+      );
+      const lookedUpAs = new Map<string, string>();
+      for (const identifier of untrackedIdentifiers) {
+        const ticket = await client.getTicketByIdentifier(identifier, reportLabelIds);
+        if (!ticket) continue;
+        trackedTickets.push(ticket);
+        lookedUpAs.set(ticket.id, prefix + identifier);
+      }
 
       actions = decideSyncActions({
         workspace,
+        labelName,
         labelId,
+        retiredLabelIds,
         labelledTickets,
         trackedTickets,
+        lookedUpAs,
         records,
         focusItems,
-        confirmedRemovals: this.confirmed(prefix, "remove"),
-        confirmedAdds: this.confirmed(prefix, "add"),
+        confirmed: this.confirmed(prefix),
+        seenUnfinished: this.seenUnfinished,
       });
     } catch (error) {
       // Nothing was seen this pass, so earlier sightings can't be confirmed by the next one
@@ -166,16 +238,18 @@ export class SyncRunner {
     }
 
     this.updateCandidates(prefix, actions);
+    this.updateSeen(prefix, focusItems, records);
 
     // Carry on past a failed action so one stuck ticket doesn't hold up the rest, unless
-    // Linear itself is out of reach
+    // Linear itself is out of reach or settings changed
     let firstError: Error | null = null;
     for (const action of actions) {
       if (this.stopped) break;
-      if (action.type === "awaitRemoval" || action.type === "awaitAdd") continue;
+      if (action.type === "await") continue;
       try {
-        await this.carryOut(action, api, workspace, client);
+        await this.carryOut(action, api, workspace, client, generation);
       } catch (error) {
+        if (error instanceof SettingsChangedError) throw error;
         if (error instanceof LinearError && error.kind !== "api") throw error;
         firstError ??= error instanceof Error ? error : new Error(String(error));
       }
@@ -183,12 +257,41 @@ export class SyncRunner {
     if (firstError !== null) throw firstError;
   }
 
-  private confirmed(prefix: string, kind: "add" | "remove"): Set<string> {
+  /**
+   * With no workspace label, refuse to go on if that would read as every label removed, or if
+   * a team label of the same name means the plugin can't make a workspace one.
+   */
+  private async checkMissingLabel(
+    workspace: WorkspaceSettings,
+    client: LinearWorkspaceClient,
+    records: Record<string, TicketRecord>
+  ): Promise<void> {
+    const { labelName } = this.deps.getData().settings;
+    if (await client.hasTeamLabel(labelName)) {
+      throw new WorkspacePausedError(
+        `"${labelName}" is a team label in ${workspace.displayName}. Flow Linear needs a workspace label: rename the team label, or choose another label name in settings.`
+      );
+    }
+    const expectsLabel = Object.values(records).some(
+      (record) =>
+        record.label !== "add-pending" &&
+        (record.labelName === undefined ||
+          record.labelName.toLowerCase() === labelName.toLowerCase())
+    );
+    if (expectsLabel) {
+      throw new WorkspacePausedError(
+        `The label "${labelName}" is missing from ${workspace.displayName}, so Flow Linear has paused it. Create the label again as a workspace label, or choose another label name in settings.`
+      );
+    }
+  }
+
+  private confirmed(prefix: string): Set<string> {
     const cutoff = this.now() - this.confirmDelayMs;
     const confirmed = new Set<string>();
     for (const [candidate, seen] of this.candidates) {
-      const [candidateKind, key] = splitCandidate(candidate);
-      if (candidateKind === kind && key.startsWith(prefix) && seen <= cutoff) confirmed.add(key);
+      if (candidateTicketKey(candidate).startsWith(prefix) && seen <= cutoff) {
+        confirmed.add(candidate);
+      }
     }
     return confirmed;
   }
@@ -197,33 +300,64 @@ export class SyncRunner {
   private updateCandidates(prefix: string, actions: SyncAction[]): void {
     const awaited = new Set<string>();
     for (const action of actions) {
-      if (action.type === "awaitRemoval") awaited.add(`remove\n${action.ticketKey}`);
-      if (action.type === "awaitAdd") awaited.add(`add\n${action.ticketKey}`);
+      if (action.type === "await") awaited.add(confirmationKey(action.change, action.ticketKey));
     }
     for (const candidate of [...this.candidates.keys()]) {
-      if (splitCandidate(candidate)[1].startsWith(prefix) && !awaited.has(candidate)) {
+      if (candidateTicketKey(candidate).startsWith(prefix) && !awaited.has(candidate)) {
         this.candidates.delete(candidate);
       }
     }
     for (const candidate of awaited) {
       if (!this.candidates.has(candidate)) this.candidates.set(candidate, this.now());
     }
-    if (awaited.size > 0) {
+    if (awaited.size > 0 && !this.followUpScheduled) {
+      this.followUpScheduled = true;
       this.deps.schedule(() => {
+        this.followUpScheduled = false;
         this.requestSync().catch((error) => console.error("Flow Linear sync failed", error));
       }, this.confirmDelayMs);
     }
   }
 
+  /** Remember tickets with unfinished items here; forget ones with neither items nor record. */
+  private updateSeen(
+    prefix: string,
+    focusItems: ExternalFocusItem[],
+    records: Record<string, TicketRecord>
+  ): void {
+    const unfinishedKeys = new Set(
+      focusItems
+        .filter((item) => item.completedAt === undefined)
+        .map((item) => itemTicketKey(item) as string)
+    );
+    let changed = false;
+    for (const key of unfinishedKeys) {
+      if (!this.seenUnfinished.has(key)) {
+        this.seenUnfinished.add(key);
+        changed = true;
+      }
+    }
+    for (const key of [...this.seenUnfinished]) {
+      if (key.startsWith(prefix) && !unfinishedKeys.has(key) && !records[key]) {
+        this.seenUnfinished.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) this.deps.saveLocal([...this.seenUnfinished]);
+  }
+
   private async carryOut(
-    action: Exclude<SyncAction, { type: "awaitRemoval" }>,
+    action: Exclude<SyncAction, { type: "await" }>,
     api: FlowApi,
     workspace: WorkspaceSettings,
-    client: LinearWorkspaceClient
+    client: LinearWorkspaceClient,
+    generation: number
   ): Promise<void> {
+    const setRecord = (record: TicketRecord | null) =>
+      this.setRecord(action.ticketKey, record, generation);
     switch (action.type) {
       case "import":
-        await this.importTicket(action, api, workspace);
+        await this.importTicket(action, api, workspace, generation);
         break;
       case "completeItems":
         await this.applyToItems(api, action.itemIds, (id) => api.completeFocusItem(id));
@@ -235,28 +369,31 @@ export class SyncRunner {
           current.some((item) => item.id === id && item.completedAt === undefined)
         );
         await this.applyToItems(api, stillUnfinished, (id) => api.removeFocusItem(id));
-        await this.setRecord(action.ticketKey, null);
+        await setRecord(null);
         break;
       }
       case "addLabel": {
         const labelId = await this.labelIdOrCreate(workspace, client);
         await this.changeLabel(workspace, () => client.addLabel(action.issueId, labelId));
-        await this.setRecord(action.ticketKey, { issueId: action.issueId, label: "synced" });
+        await setRecord({ issueId: action.issueId, label: "synced" });
         break;
       }
       case "removeLabel": {
         // Recorded first, so a failed removal is retried without waiting for confirmation again
-        await this.setRecord(action.ticketKey, {
-          issueId: action.issueId,
-          label: "remove-pending",
-        });
+        await setRecord({ issueId: action.issueId, label: "remove-pending" });
         const labelId = await this.labelIdOrCreate(workspace, client);
         await this.changeLabel(workspace, () => client.removeLabel(action.issueId, labelId));
-        await this.setRecord(action.ticketKey, null);
+        await setRecord(null);
+        break;
+      }
+      case "retireLabel": {
+        const { labelId } = action;
+        if (labelId) await client.removeLabel(action.issueId, labelId);
+        await setRecord(action.next);
         break;
       }
       case "setRecord":
-        await this.setRecord(action.ticketKey, action.record);
+        await setRecord(action.record);
         break;
     }
   }
@@ -264,7 +401,8 @@ export class SyncRunner {
   private async importTicket(
     action: Extract<SyncAction, { type: "import" }>,
     api: FlowApi,
-    workspace: WorkspaceSettings
+    workspace: WorkspaceSettings,
+    generation: number
   ): Promise<void> {
     // Another device may have imported it since this sync read Focus
     const current = await api.getFocusItems(SOURCE_NAME);
@@ -283,7 +421,12 @@ export class SyncRunner {
         externalId: action.ticket.identifier,
       });
     }
-    await this.setRecord(action.ticketKey, { issueId: action.ticket.id, label: "synced" });
+    this.markSeenUnfinished(action.ticketKey);
+    await this.setRecord(
+      action.ticketKey,
+      { issueId: action.ticket.id, label: "synced" },
+      generation
+    );
   }
 
   /**
@@ -346,10 +489,20 @@ export class SyncRunner {
     }
   }
 
-  private async setRecord(key: string, record: TicketRecord | null): Promise<void> {
+  private async setRecord(
+    key: string,
+    record: TicketRecord | null,
+    generation: number
+  ): Promise<void> {
+    if (this.stopped) return;
+    if (this.deps.getSettingsGeneration() !== generation) throw new SettingsChangedError();
     const { tickets } = this.deps.getData();
-    if (record) tickets[key] = record;
-    else delete tickets[key];
+    if (record) {
+      tickets[key] = record;
+    } else {
+      delete tickets[key];
+      if (this.seenUnfinished.delete(key)) this.deps.saveLocal([...this.seenUnfinished]);
+    }
     await this.deps.saveData();
   }
 
@@ -358,6 +511,10 @@ export class SyncRunner {
     const message = errorMessage(error);
     this.statuses.set(urlKey, { ...this.getStatus(urlKey), error: message });
 
+    if (error instanceof WorkspacePausedError) {
+      this.notifyOnce(urlKey, "paused", message);
+      return;
+    }
     if (!(error instanceof LinearError)) {
       console.error(`Flow Linear sync failed for ${displayName}`, error);
       this.notifyOnce(urlKey, "other", `Flow Linear couldn't sync ${displayName}: ${message}`);
@@ -378,8 +535,10 @@ export class SyncRunner {
         break;
       }
       case "network":
+        this.notifyOnce(urlKey, "network", `Couldn't reach Linear for ${displayName}`);
+        break;
       case "api":
-        this.notifyOnce(urlKey, "unreachable", `Couldn't reach Linear for ${displayName}`);
+        this.notifyOnce(urlKey, "api", `Linear reported an error for ${displayName}: ${message}`);
         break;
     }
   }

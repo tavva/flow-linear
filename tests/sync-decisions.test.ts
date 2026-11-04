@@ -1,36 +1,57 @@
 // ABOUTME: Table-driven tests for decideSyncActions, one group per sync rule.
-// ABOUTME: Also covers deleted tickets, several items per ticket and clashing identifiers.
+// ABOUTME: Also covers confirmation, label renames, deleted and moved tickets, and workspaces.
 
-import { decideSyncActions, itemTicketKey, SyncInput } from "../src/sync-decisions";
+import {
+  ConfirmedChange,
+  confirmationKey,
+  decideSyncActions,
+  itemTicketKey,
+  SyncInput,
+} from "../src/sync-decisions";
 import { TicketRecord } from "../src/settings";
 import { FOCUS_LABEL_ID, focusItem, labelled, ticket, workspace } from "./helpers/builders";
+
+const KEY = "testco/TST-1";
 
 function decide(overrides: Partial<SyncInput>) {
   return decideSyncActions({
     workspace: workspace(),
+    labelName: "flow-focus",
     labelId: FOCUS_LABEL_ID,
+    retiredLabelIds: new Map(),
     labelledTickets: [],
     trackedTickets: [],
+    lookedUpAs: new Map(),
     records: {},
     focusItems: [],
-    confirmedRemovals: new Set(),
-    confirmedAdds: new Set(),
+    confirmed: new Set(),
+    seenUnfinished: new Set(),
     ...overrides,
   });
 }
 
-const synced = (identifier: string): TicketRecord => ({
+function confirmedFor(change: ConfirmedChange, key = KEY) {
+  return new Set([confirmationKey(change, key)]);
+}
+
+const awaiting = (change: ConfirmedChange, ticketKey = KEY) => ({
+  type: "await",
+  change,
+  ticketKey,
+});
+
+const synced = (identifier = "TST-1"): TicketRecord => ({
   issueId: `uuid-testco-${identifier}`,
   label: "synced",
 });
-const pending = (identifier: string, label: TicketRecord["label"]): TicketRecord => ({
+const pending = (label: TicketRecord["label"], identifier = "TST-1"): TicketRecord => ({
   issueId: `uuid-testco-${identifier}`,
   label,
 });
 
 describe("rule 1: closed in Linear", () => {
   it.each(["completed", "canceled"])(
-    "completes unfinished items and removes the label (%s)",
+    "completes unfinished items and removes the label at once (%s)",
     (stateType) => {
       const done = focusItem("TST-1", { completedAt: 5 });
       const open = focusItem("TST-1");
@@ -39,12 +60,12 @@ describe("rule 1: closed in Linear", () => {
         decide({
           labelledTickets: [closed],
           trackedTickets: [closed],
-          records: { "testco/TST-1": synced("TST-1") },
+          records: { [KEY]: synced() },
           focusItems: [done, open],
         })
       ).toEqual([
-        { type: "completeItems", ticketKey: "testco/TST-1", itemIds: [open.id] },
-        { type: "removeLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" },
+        { type: "completeItems", ticketKey: KEY, itemIds: [open.id] },
+        { type: "removeLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" },
       ]);
     }
   );
@@ -54,12 +75,12 @@ describe("rule 1: closed in Linear", () => {
     expect(
       decide({
         trackedTickets: [ticket("TST-1", { stateType: "completed" })],
-        records: { "testco/TST-1": synced("TST-1") },
+        records: { [KEY]: synced() },
         focusItems: [item],
       })
     ).toEqual([
-      { type: "completeItems", ticketKey: "testco/TST-1", itemIds: [item.id] },
-      { type: "setRecord", ticketKey: "testco/TST-1", record: null },
+      { type: "completeItems", ticketKey: KEY, itemIds: [item.id] },
+      { type: "setRecord", ticketKey: KEY, record: null },
     ]);
   });
 
@@ -73,9 +94,9 @@ describe("rule 1: closed in Linear", () => {
 describe("deleted in Linear", () => {
   it("treats a tracked ticket that comes back missing as closed", () => {
     const item = focusItem("TST-1");
-    expect(decide({ records: { "testco/TST-1": synced("TST-1") }, focusItems: [item] })).toEqual([
-      { type: "completeItems", ticketKey: "testco/TST-1", itemIds: [item.id] },
-      { type: "setRecord", ticketKey: "testco/TST-1", record: null },
+    expect(decide({ records: { [KEY]: synced() }, focusItems: [item] })).toEqual([
+      { type: "completeItems", ticketKey: KEY, itemIds: [item.id] },
+      { type: "setRecord", ticketKey: KEY, record: null },
     ]);
   });
 
@@ -85,158 +106,148 @@ describe("deleted in Linear", () => {
       decide({
         labelledTickets: [trashed],
         trackedTickets: [trashed],
-        records: { "testco/TST-1": synced("TST-1") },
+        records: { [KEY]: synced() },
       })
-    ).toEqual([{ type: "setRecord", ticketKey: "testco/TST-1", record: null }]);
+    ).toEqual([{ type: "setRecord", ticketKey: KEY, record: null }]);
   });
 
   it("leaves alone items of an untracked ticket that Linear didn't return", () => {
-    // It may be in a team the key can't see, or have moved
+    // It may be in a team the key can't see
     expect(decide({ focusItems: [focusItem("TST-9")] })).toEqual([]);
   });
 });
 
 describe("rule 2: label added in Linear", () => {
-  it("imports a labelled ticket with no record and no items", () => {
-    const t = labelled("TST-1");
-    expect(decide({ labelledTickets: [t] })).toEqual([
-      { type: "import", ticketKey: "testco/TST-1", ticket: t },
+  const t = labelled("TST-1");
+
+  it("waits for a later pass, then imports", () => {
+    expect(decide({ labelledTickets: [t] })).toEqual([awaiting("import")]);
+    expect(decide({ labelledTickets: [t], confirmed: confirmedFor("import") })).toEqual([
+      { type: "import", ticketKey: KEY, ticket: t },
     ]);
+  });
+
+  it("imports again when the ticket's only linked items are completed", () => {
+    expect(
+      decide({
+        labelledTickets: [t],
+        focusItems: [focusItem("TST-1", { completedAt: 9 })],
+        confirmed: confirmedFor("import"),
+      })
+    ).toEqual([{ type: "import", ticketKey: KEY, ticket: t }]);
   });
 
   it("counts a ticket as labelled only by the workspace label's id", () => {
     // A team label of the same name has another id
     const teamLabelled = ticket("TST-1", { labelIds: ["team-label"] });
-    expect(
-      decide({
-        trackedTickets: [teamLabelled],
-        records: { "testco/TST-1": synced("TST-1") },
-        focusItems: [],
-      })
-    ).toEqual([{ type: "removeItems", ticketKey: "testco/TST-1", itemIds: [] }]);
-  });
-
-  it("sees no label anywhere while the workspace has none", () => {
-    const item = focusItem("TST-1");
-    expect(
-      decide({
-        labelId: null,
-        trackedTickets: [ticket("TST-1", { labelIds: ["team-label"] })],
-        records: { "testco/TST-1": pending("TST-1", "add-pending") },
-        focusItems: [item],
-      })
-    ).toEqual([{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
-  });
-
-  it("imports again when the ticket's only linked items are completed", () => {
-    const t = labelled("TST-1");
-    expect(
-      decide({ labelledTickets: [t], focusItems: [focusItem("TST-1", { completedAt: 9 })] })
-    ).toEqual([{ type: "import", ticketKey: "testco/TST-1", ticket: t }]);
+    expect(decide({ trackedTickets: [teamLabelled], records: { [KEY]: synced() } })).toEqual([
+      { type: "setRecord", ticketKey: KEY, record: null },
+    ]);
   });
 });
 
 describe("rule 3: label removed in Linear", () => {
-  it("removes unfinished items, keeps completed ones and deletes the record", () => {
-    const open = focusItem("TST-1");
-    const done = focusItem("TST-1", { completedAt: 3 });
-    expect(
-      decide({
-        trackedTickets: [ticket("TST-1")],
-        records: { "testco/TST-1": synced("TST-1") },
-        focusItems: [open, done],
-      })
-    ).toEqual([{ type: "removeItems", ticketKey: "testco/TST-1", itemIds: [open.id] }]);
+  const open = focusItem("TST-1");
+  const done = focusItem("TST-1", { completedAt: 3 });
+  const input = {
+    trackedTickets: [ticket("TST-1")],
+    records: { [KEY]: synced() },
+    focusItems: [open, done],
+  };
+
+  it("rechecks on a later pass, then removes unfinished items and keeps completed ones", () => {
+    expect(decide(input)).toEqual([awaiting("removeItems")]);
+    expect(decide({ ...input, confirmed: confirmedFor("removeItems") })).toEqual([
+      { type: "removeItems", ticketKey: KEY, itemIds: [open.id] },
+    ]);
   });
 
-  it("deletes the record when there are no unfinished items", () => {
-    expect(
-      decide({ trackedTickets: [ticket("TST-1")], records: { "testco/TST-1": synced("TST-1") } })
-    ).toEqual([{ type: "removeItems", ticketKey: "testco/TST-1", itemIds: [] }]);
+  it("just deletes the record when there are no unfinished items", () => {
+    expect(decide({ trackedTickets: [ticket("TST-1")], records: { [KEY]: synced() } })).toEqual([
+      { type: "setRecord", ticketKey: KEY, record: null },
+    ]);
   });
 });
 
 describe("rule 4: label to add", () => {
-  it("adds the label for a pending add", () => {
-    expect(
-      decide({
-        trackedTickets: [ticket("TST-1")],
-        records: { "testco/TST-1": pending("TST-1", "add-pending") },
-        focusItems: [focusItem("TST-1")],
-      })
-    ).toEqual([{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
-  });
+  it.each(["add-pending", "remove-pending"] as const)(
+    "adds the label at once for a %s record with unfinished items",
+    (label) => {
+      expect(
+        decide({
+          trackedTickets: [ticket("TST-1")],
+          records: { [KEY]: pending(label) },
+          focusItems: [focusItem("TST-1")],
+        })
+      ).toEqual([{ type: "addLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" }]);
+    }
+  );
 
   it("waits before adding the label for an item from another device with no record", () => {
     const input = { trackedTickets: [ticket("TST-1")], focusItems: [focusItem("TST-1")] };
-    expect(decide(input)).toEqual([{ type: "awaitAdd", ticketKey: "testco/TST-1" }]);
-    expect(decide({ ...input, confirmedAdds: new Set(["testco/TST-1"]) })).toEqual([
-      { type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" },
+    expect(decide(input)).toEqual([awaiting("addLabel")]);
+    expect(decide({ ...input, confirmed: confirmedFor("addLabel") })).toEqual([
+      { type: "addLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" },
     ]);
   });
 
-  it("adds the label back when an item returns while a removal is pending", () => {
+  it("adds the label when the workspace doesn't have it yet", () => {
     expect(
       decide({
-        trackedTickets: [ticket("TST-1")],
-        records: { "testco/TST-1": pending("TST-1", "remove-pending") },
+        labelId: null,
+        trackedTickets: [ticket("TST-1", { labelIds: [] })],
+        records: { [KEY]: pending("add-pending") },
         focusItems: [focusItem("TST-1")],
       })
-    ).toEqual([{ type: "addLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
+    ).toEqual([{ type: "addLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" }]);
   });
 });
 
 describe("rule 5: label to remove", () => {
-  const records = { "testco/TST-1": synced("TST-1") };
   const t = labelled("TST-1");
+  const base = { labelledTickets: [t], trackedTickets: [t], records: { [KEY]: synced() } };
 
-  it("waits for confirmation before removing the label", () => {
-    expect(decide({ labelledTickets: [t], trackedTickets: [t], records })).toEqual([
-      { type: "awaitRemoval", ticketKey: "testco/TST-1" },
-    ]);
-  });
-
-  it("waits when the only linked items are completed", () => {
-    expect(
-      decide({
-        labelledTickets: [t],
-        trackedTickets: [t],
-        records,
-        focusItems: [focusItem("TST-1", { completedAt: 2 })],
-      })
-    ).toEqual([{ type: "awaitRemoval", ticketKey: "testco/TST-1" }]);
+  it("waits for confirmation when this device saw the items", () => {
+    expect(decide({ ...base, seenUnfinished: new Set([KEY]) })).toEqual([awaiting("removeLabel")]);
   });
 
   it("removes the label once confirmed", () => {
     expect(
       decide({
-        labelledTickets: [t],
-        trackedTickets: [t],
-        records,
-        confirmedRemovals: new Set(["testco/TST-1"]),
+        ...base,
+        seenUnfinished: new Set([KEY]),
+        confirmed: confirmedFor("removeLabel"),
       })
-    ).toEqual([{ type: "removeLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
+    ).toEqual([{ type: "removeLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" }]);
+  });
+
+  it("leaves the label alone when this device never saw the items unfinished", () => {
+    // Another device added them; this device's focus file may simply be behind
+    expect(decide({ ...base, confirmed: confirmedFor("removeLabel") })).toEqual([]);
+  });
+
+  it("waits when the only linked items are completed", () => {
+    expect(
+      decide({
+        ...base,
+        focusItems: [focusItem("TST-1", { completedAt: 2 })],
+        seenUnfinished: new Set([KEY]),
+      })
+    ).toEqual([awaiting("removeLabel")]);
   });
 
   it("retries a pending removal without waiting again", () => {
-    expect(
-      decide({
-        labelledTickets: [t],
-        trackedTickets: [t],
-        records: { "testco/TST-1": pending("TST-1", "remove-pending") },
-      })
-    ).toEqual([{ type: "removeLabel", ticketKey: "testco/TST-1", issueId: "uuid-testco-TST-1" }]);
+    expect(decide({ ...base, records: { [KEY]: pending("remove-pending") } })).toEqual([
+      { type: "removeLabel", ticketKey: KEY, issueId: "uuid-testco-TST-1" },
+    ]);
   });
 
   it.each(["add-pending", "remove-pending"] as const)(
     "deletes a %s record when the label is already gone",
     (label) => {
       expect(
-        decide({
-          trackedTickets: [ticket("TST-1")],
-          records: { "testco/TST-1": pending("TST-1", label) },
-        })
-      ).toEqual([{ type: "setRecord", ticketKey: "testco/TST-1", record: null }]);
+        decide({ trackedTickets: [ticket("TST-1")], records: { [KEY]: pending(label) } })
+      ).toEqual([{ type: "setRecord", ticketKey: KEY, record: null }]);
     }
   );
 });
@@ -249,13 +260,13 @@ describe("rule 6: label present and wanted", () => {
       decide({
         labelledTickets: [t],
         trackedTickets: [t],
-        records: { "testco/TST-1": pending("TST-1", "add-pending") },
+        records: { [KEY]: pending("add-pending") },
         focusItems: [focusItem("TST-1")],
       })
     ).toEqual([
       {
         type: "setRecord",
-        ticketKey: "testco/TST-1",
+        ticketKey: KEY,
         record: { issueId: "uuid-testco-TST-1", label: "synced" },
       },
     ]);
@@ -267,7 +278,7 @@ describe("rule 6: label present and wanted", () => {
     ).toEqual([
       {
         type: "setRecord",
-        ticketKey: "testco/TST-1",
+        ticketKey: KEY,
         record: { issueId: "uuid-testco-TST-1", label: "synced" },
       },
     ]);
@@ -278,22 +289,83 @@ describe("rule 6: label present and wanted", () => {
       decide({
         labelledTickets: [t],
         trackedTickets: [t],
-        records: { "testco/TST-1": synced("TST-1") },
+        records: { [KEY]: synced() },
         focusItems: [focusItem("TST-1")],
+        seenUnfinished: new Set([KEY]),
+      })
+    ).toEqual([]);
+  });
+
+  it("keeps the label while one of several items is unfinished", () => {
+    expect(
+      decide({
+        labelledTickets: [t],
+        trackedTickets: [t],
+        records: { [KEY]: synced() },
+        focusItems: [focusItem("TST-1", { completedAt: 4 }), focusItem("TST-1")],
+        seenUnfinished: new Set([KEY]),
       })
     ).toEqual([]);
   });
 });
 
-describe("several items for one ticket", () => {
-  it("keeps the label while one unfinished item remains", () => {
+describe("label renamed in settings", () => {
+  const retiredLabelIds = new Map([["old-focus", "label-old"]]);
+
+  it("takes the old label off, then wants the new one", () => {
+    expect(
+      decide({
+        retiredLabelIds,
+        trackedTickets: [ticket("TST-1", { labelIds: ["label-old"] })],
+        records: { [KEY]: { ...synced(), labelName: "old-focus" } },
+        focusItems: [focusItem("TST-1")],
+      })
+    ).toEqual([
+      {
+        type: "retireLabel",
+        ticketKey: KEY,
+        issueId: "uuid-testco-TST-1",
+        labelId: "label-old",
+        next: { issueId: "uuid-testco-TST-1", label: "add-pending" },
+      },
+    ]);
+  });
+
+  it("finishes a pending removal of the old label and forgets the ticket", () => {
+    expect(
+      decide({
+        retiredLabelIds,
+        trackedTickets: [ticket("TST-1", { labelIds: ["label-old"] })],
+        records: { [KEY]: { ...pending("remove-pending"), labelName: "old-focus" } },
+      })
+    ).toEqual([
+      {
+        type: "retireLabel",
+        ticketKey: KEY,
+        issueId: "uuid-testco-TST-1",
+        labelId: "label-old",
+        next: null,
+      },
+    ]);
+  });
+
+  it("skips the removal when the old label is gone or not on the ticket", () => {
+    const actions = decide({
+      retiredLabelIds: new Map([["old-focus", null]]),
+      trackedTickets: [ticket("TST-1")],
+      records: { [KEY]: { ...synced(), labelName: "old-focus" } },
+    });
+    expect(actions).toEqual([expect.objectContaining({ type: "retireLabel", labelId: null })]);
+  });
+
+  it("treats a record naming the current label as current", () => {
     const t = labelled("TST-1");
     expect(
       decide({
         labelledTickets: [t],
         trackedTickets: [t],
-        records: { "testco/TST-1": synced("TST-1") },
-        focusItems: [focusItem("TST-1", { completedAt: 4 }), focusItem("TST-1")],
+        records: { [KEY]: { ...synced(), labelName: "Flow-Focus" } },
+        focusItems: [focusItem("TST-1")],
       })
     ).toEqual([]);
   });
@@ -302,18 +374,9 @@ describe("several items for one ticket", () => {
 describe("workspaces", () => {
   it("ignores items and records for other workspaces, even with the same identifier", () => {
     const other = focusItem("TST-1", { urlKey: "otherco" });
-    expect(
-      decide({
-        workspace: workspace("testco"),
-        focusItems: [other],
-        records: {},
-        labelledTickets: [],
-      })
-    ).toEqual([]);
-
-    const ours = labelled("TST-1");
-    expect(decide({ labelledTickets: [ours], focusItems: [other] })).toEqual([
-      { type: "import", ticketKey: "testco/TST-1", ticket: ours },
+    expect(decide({ focusItems: [other] })).toEqual([]);
+    expect(decide({ labelledTickets: [labelled("TST-1")], focusItems: [other] })).toEqual([
+      awaiting("import"),
     ]);
   });
 
@@ -326,45 +389,52 @@ describe("workspaces", () => {
 });
 
 describe("identifier changes", () => {
+  const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
+
   it("follows a tracked ticket by UUID when it moves team", () => {
-    const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
     expect(
       decide({
         labelledTickets: [moved],
         trackedTickets: [moved],
-        records: { "testco/TST-1": synced("TST-1") },
+        records: { [KEY]: synced() },
         focusItems: [focusItem("TST-1")],
       })
     ).toEqual([]);
   });
 
   it("counts items linked by the new identifier towards the tracked ticket", () => {
-    const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
     expect(
       decide({
         labelledTickets: [moved],
         trackedTickets: [moved],
-        records: { "testco/TST-1": synced("TST-1") },
+        records: { [KEY]: synced() },
         focusItems: [focusItem("NEW-7")],
       })
     ).toEqual([]);
   });
 
+  it("keys an untracked ticket by the identifier its item was looked up with", () => {
+    const found = ticket("NEW-7", { id: "uuid-moved" });
+    expect(
+      decide({
+        trackedTickets: [found],
+        lookedUpAs: new Map([["uuid-moved", KEY]]),
+        focusItems: [focusItem("TST-1")],
+      })
+    ).toEqual([awaiting("addLabel")]);
+  });
+
   it("merges two records for one ticket, keeping the first key", () => {
-    const moved = labelled("NEW-7", { id: "uuid-testco-TST-1" });
     expect(
       decide({
         labelledTickets: [moved],
         trackedTickets: [moved],
-        records: {
-          "testco/TST-1": synced("TST-1"),
-          "testco/NEW-7": pending("TST-1", "add-pending"),
-        },
+        records: { [KEY]: synced(), "testco/NEW-7": pending("add-pending") },
         focusItems: [focusItem("TST-1", { completedAt: 1 }), focusItem("NEW-7")],
       })
     ).toEqual([
       // "testco/NEW-7" sorts first, so it stays; the other record goes
-      { type: "setRecord", ticketKey: "testco/TST-1", record: null },
+      { type: "setRecord", ticketKey: KEY, record: null },
       {
         type: "setRecord",
         ticketKey: "testco/NEW-7",

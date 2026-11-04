@@ -14,6 +14,8 @@ type Method = keyof LinearWorkspaceClient;
 export class LinearWorkspace implements LinearWorkspaceClient {
   tickets: LinearTicket[] = [];
   labels = new Map<string, string>([["flow-focus", FOCUS_LABEL_ID]]); // name → id, workspace-level
+  teamLabels = new Set<string>(); // Lower-case names of team-level labels
+  oldIdentifiers = new Map<string, string>(); // Identifier a ticket had before moving → its id
   writes: string[] = [];
   calls: Method[] = [];
   private failures = new Map<Method, LinearErrorKind>();
@@ -42,29 +44,41 @@ export class LinearWorkspace implements LinearWorkspaceClient {
     return { name: this.name, urlKey: this.urlKey };
   }
 
-  async getTicketByIdentifier(identifier: string) {
+  // Reports only the asked-for label ids, as the real client does
+  private report(ticket: LinearTicket, labelIds: string[]): LinearTicket {
+    const copy = structuredClone(ticket);
+    copy.labelIds = copy.labelIds.filter((id) => labelIds.includes(id));
+    return copy;
+  }
+
+  async getTicketByIdentifier(identifier: string, labelIds: string[]) {
     this.call("getTicketByIdentifier");
-    return structuredClone(this.tickets.find((t) => t.identifier === identifier) ?? null);
+    const ticket = this.tickets.find(
+      (t) => t.identifier === identifier || (this.oldIdentifiers.get(identifier) ?? "") === t.id
+    );
+    return ticket ? this.report(ticket, labelIds) : null;
   }
 
-  async getLabelledTickets(labelId: string) {
+  async getLabelledTickets(labelId: string, labelIds: string[]) {
     this.call("getLabelledTickets");
-    return structuredClone(this.tickets.filter((t) => t.labelIds.includes(labelId)));
+    return this.tickets
+      .filter((t) => t.labelIds.includes(labelId))
+      .map((t) => this.report(t, labelIds));
   }
 
-  async getTicketsByIds(ids: string[]) {
+  async getTicketsByIds(ids: string[], labelIds: string[]) {
     this.call("getTicketsByIds");
-    return structuredClone(this.tickets.filter((t) => ids.includes(t.id)));
-  }
-
-  async getTicketsByIdentifiers(identifiers: string[]) {
-    this.call("getTicketsByIdentifiers");
-    return structuredClone(this.tickets.filter((t) => identifiers.includes(t.identifier)));
+    return this.tickets.filter((t) => ids.includes(t.id)).map((t) => this.report(t, labelIds));
   }
 
   async findWorkspaceLabel(labelName: string) {
     this.call("findWorkspaceLabel");
     return this.labels.get(labelName.toLowerCase()) ?? null;
+  }
+
+  async hasTeamLabel(labelName: string) {
+    this.call("hasTeamLabel");
+    return this.teamLabels.has(labelName.toLowerCase());
   }
 
   async createWorkspaceLabel(labelName: string) {

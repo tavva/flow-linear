@@ -180,6 +180,9 @@ export class TextComponent {
     this.value = value;
     return this;
   }
+  getValue(): string {
+    return this.value;
+  }
   onChange(handler: ChangeHandler<string>): this {
     this.handler = handler;
     return this;

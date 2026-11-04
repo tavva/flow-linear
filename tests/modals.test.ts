@@ -63,6 +63,7 @@ describe("AddTicketModal", () => {
       requestSync: () => {
         syncs++;
       },
+      markSeenUnfinished: () => {},
     });
     const modal = new AddTicketModal({} as never, addTicket, () => focus.getSpheres());
     modal.open();

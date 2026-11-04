@@ -2,9 +2,9 @@
 // ABOUTME: Maps HTTP and GraphQL failures onto a small set of error kinds the sync can act on.
 
 import { requestUrl } from "obsidian";
-import { splitIdentifier } from "./ticket-url";
 
 export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
+export const REQUEST_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 100;
 
 export interface LinearTicket {
@@ -13,7 +13,7 @@ export interface LinearTicket {
   url: string;
   title: string;
   stateType: string;
-  labelIds: string[];
+  labelIds: string[]; // Only the labels the caller asked about, not all the ticket's labels
   trashed: boolean;
 }
 
@@ -34,20 +34,26 @@ export class LinearError extends Error {
   }
 }
 
-/** What the sync and the add modal need from Linear for one workspace. */
+/**
+ * What the sync and the add modal need from Linear for one workspace. Ticket lookups take the
+ * label ids to report on each ticket (`labelIds`), so only the plugin's own labels are read.
+ */
 export interface LinearWorkspaceClient {
   getOrganization(): Promise<LinearOrganization>;
-  getTicketByIdentifier(identifier: string): Promise<LinearTicket | null>;
-  getLabelledTickets(labelId: string): Promise<LinearTicket[]>;
-  getTicketsByIds(ids: string[]): Promise<LinearTicket[]>;
-  getTicketsByIdentifiers(identifiers: string[]): Promise<LinearTicket[]>;
+  // Accepts an identifier the ticket had before it moved team; null if there's no such ticket
+  getTicketByIdentifier(identifier: string, labelIds: string[]): Promise<LinearTicket | null>;
+  getLabelledTickets(labelId: string, labelIds: string[]): Promise<LinearTicket[]>;
+  getTicketsByIds(ids: string[], labelIds: string[]): Promise<LinearTicket[]>;
   findWorkspaceLabel(labelName: string): Promise<string | null>;
+  hasTeamLabel(labelName: string): Promise<boolean>;
   createWorkspaceLabel(labelName: string): Promise<string>;
   addLabel(issueId: string, labelId: string): Promise<void>;
   removeLabel(issueId: string, labelId: string): Promise<void>;
 }
 
-const TICKET_FIELDS = `id identifier url title trashed state { type } labels { nodes { id } }`;
+// Needs a `$labelIds: [ID!]` variable in the query
+const TICKET_FIELDS = `id identifier url title trashed state { type }
+  labels(filter: { id: { in: $labelIds } }) { nodes { id } }`;
 
 interface TicketNode {
   id: string;
@@ -69,6 +75,12 @@ interface IssuePage {
 interface GraphqlError {
   message?: string;
   extensions?: { code?: string; type?: string; userPresentableMessage?: string };
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    error instanceof LinearError && error.kind === "api" && /entity not found/i.test(error.message)
+  );
 }
 
 function toTicket(node: TicketNode): LinearTicket {
@@ -99,6 +111,17 @@ function readJson(text: string): unknown {
   }
 }
 
+/** requestUrl has no timeout of its own; give up on Linear after REQUEST_TIMEOUT_MS. */
+function withTimeout<T>(request: Promise<T>): Promise<T> {
+  let timer: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new LinearError("network", "Linear didn't answer within 30 seconds"));
+    }, REQUEST_TIMEOUT_MS);
+  });
+  return Promise.race([request, timeout]).finally(() => window.clearTimeout(timer));
+}
+
 export class LinearClient implements LinearWorkspaceClient {
   constructor(private apiKey: string) {}
 
@@ -109,29 +132,30 @@ export class LinearClient implements LinearWorkspaceClient {
     return data.viewer.organization;
   }
 
-  async getTicketByIdentifier(identifier: string): Promise<LinearTicket | null> {
-    const tickets = await this.getTicketsByIdentifiers([identifier]);
-    return tickets.find((ticket) => ticket.identifier === identifier) ?? null;
+  async getTicketByIdentifier(
+    identifier: string,
+    labelIds: string[]
+  ): Promise<LinearTicket | null> {
+    try {
+      const data = await this.query<{ issue: TicketNode | null }>(
+        `query ($id: String!, $labelIds: [ID!]) { issue(id: $id) { ${TICKET_FIELDS} } }`,
+        { id: identifier, labelIds }
+      );
+      return data.issue ? toTicket(data.issue) : null;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
   }
 
   // By id, so a team label that happens to share the name doesn't count
-  getLabelledTickets(labelId: string): Promise<LinearTicket[]> {
-    return this.queryIssues({ labels: { id: { eq: labelId } } });
+  getLabelledTickets(labelId: string, labelIds: string[]): Promise<LinearTicket[]> {
+    return this.queryIssues({ labels: { id: { eq: labelId } } }, labelIds);
   }
 
-  getTicketsByIds(ids: string[]): Promise<LinearTicket[]> {
+  getTicketsByIds(ids: string[], labelIds: string[]): Promise<LinearTicket[]> {
     if (ids.length === 0) return Promise.resolve([]);
-    return this.queryIssues({ id: { in: ids } });
-  }
-
-  getTicketsByIdentifiers(identifiers: string[]): Promise<LinearTicket[]> {
-    const conditions = identifiers.flatMap((identifier) => {
-      const parts = splitIdentifier(identifier);
-      if (!parts) return [];
-      return [{ team: { key: { eq: parts.teamKey } }, number: { eq: parts.number } }];
-    });
-    if (conditions.length === 0) return Promise.resolve([]);
-    return this.queryIssues({ or: conditions });
+    return this.queryIssues({ id: { in: ids } }, labelIds);
   }
 
   async findWorkspaceLabel(labelName: string): Promise<string | null> {
@@ -144,6 +168,18 @@ export class LinearClient implements LinearWorkspaceClient {
       { name: labelName }
     );
     return data.issueLabels.nodes[0]?.id ?? null;
+  }
+
+  async hasTeamLabel(labelName: string): Promise<boolean> {
+    const data = await this.query<{ issueLabels: { nodes: { id: string }[] } }>(
+      `query ($name: String!) {
+        issueLabels(filter: { name: { eqIgnoreCase: $name }, team: { null: false } }, first: 1) {
+          nodes { id }
+        }
+      }`,
+      { name: labelName }
+    );
+    return data.issueLabels.nodes.length > 0;
   }
 
   async createWorkspaceLabel(labelName: string): Promise<string> {
@@ -186,18 +222,18 @@ export class LinearClient implements LinearWorkspaceClient {
     }
   }
 
-  private async queryIssues(filter: object): Promise<LinearTicket[]> {
+  private async queryIssues(filter: object, labelIds: string[]): Promise<LinearTicket[]> {
     const tickets: LinearTicket[] = [];
     let after: string | null = null;
     do {
       const data: IssuePage = await this.query<IssuePage>(
-        `query ($filter: IssueFilter, $after: String) {
+        `query ($filter: IssueFilter, $after: String, $labelIds: [ID!]) {
           issues(filter: $filter, first: ${PAGE_SIZE}, after: $after, includeArchived: true) {
             nodes { ${TICKET_FIELDS} }
             pageInfo { hasNextPage endCursor }
           }
         }`,
-        { filter, after }
+        { filter, after, labelIds }
       );
       tickets.push(...data.issues.nodes.map(toTicket));
       after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
@@ -208,15 +244,18 @@ export class LinearClient implements LinearWorkspaceClient {
   private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
     let response;
     try {
-      response = await requestUrl({
-        url: LINEAR_GRAPHQL_URL,
-        method: "POST",
-        contentType: "application/json",
-        headers: { Authorization: this.apiKey },
-        body: JSON.stringify({ query, variables }),
-        throw: false,
-      });
+      response = await withTimeout(
+        requestUrl({
+          url: LINEAR_GRAPHQL_URL,
+          method: "POST",
+          contentType: "application/json",
+          headers: { Authorization: this.apiKey },
+          body: JSON.stringify({ query, variables }),
+          throw: false,
+        })
+      );
     } catch (error) {
+      if (error instanceof LinearError) throw error;
       throw new LinearError("network", error instanceof Error ? error.message : String(error));
     }
 

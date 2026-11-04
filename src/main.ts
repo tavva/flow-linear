@@ -21,6 +21,12 @@ import { SyncRunner } from "./sync-runner";
 // Focus changes arrive in bursts; wait for them to settle before syncing
 const CHANGE_SYNC_DELAY_MS = 2000;
 
+// After connecting to Flow, give the vault's sync time to bring in other devices' changes
+// before the first check, so a device waking with an old focus file doesn't act on it
+export const STARTUP_SYNC_DELAY_MS = 30_000;
+
+const SEEN_UNFINISHED_KEY = "flow-linear-seen-unfinished";
+
 export const FLOW_WITHOUT_API_NOTICE =
   "This version of Flow is too old for Flow Linear, so Flow Linear won't sync. Update Flow on every device that syncs this vault.";
 
@@ -34,6 +40,9 @@ export default class FlowLinearPlugin extends Plugin {
   private changeTimer: number | null = null;
   private timers = new Set<number>();
   private warnedAboutVersion = false;
+  private startupTimer: number | null = null;
+  private syncAllowed = false;
+  private settingsGeneration = 0;
 
   async onload(): Promise<void> {
     this.data = readStoredData(await this.loadData());
@@ -42,16 +51,13 @@ export default class FlowLinearPlugin extends Plugin {
       getFlowApi: () => this.flowApi,
       getData: () => this.data,
       saveData: () => this.saveData(this.data),
+      getSettingsGeneration: () => this.settingsGeneration,
+      loadLocal: (): unknown => this.app.loadLocalStorage(SEEN_UNFINISHED_KEY) as unknown,
+      saveLocal: (value) => this.app.saveLocalStorage(SEEN_UNFINISHED_KEY, value),
       getSecret: (name) => this.getSecret(name),
       createClient: (apiKey) => this.createClient(apiKey),
       notify: (message) => new Notice(message),
-      schedule: (callback, delayMs) => {
-        const id = window.setTimeout(() => {
-          this.timers.delete(id);
-          callback();
-        }, delayMs);
-        this.timers.add(id);
-      },
+      schedule: (callback, delayMs) => this.schedule(callback, delayMs),
     });
 
     this.addSettingTab(new FlowLinearSettingTab(this.app, this));
@@ -63,6 +69,7 @@ export default class FlowLinearPlugin extends Plugin {
       getSecret: (name) => this.getSecret(name),
       createClient: (apiKey) => this.createClient(apiKey),
       requestSync: () => this.requestSync(),
+      markSeenUnfinished: (key) => this.runner.markSeenUnfinished(key),
     });
     this.addCommand({
       id: "add-ticket-to-focus",
@@ -110,8 +117,37 @@ export default class FlowLinearPlugin extends Plugin {
     Object.assign(this.data.settings, data.settings);
     for (const key of Object.keys(this.data.tickets)) delete this.data.tickets[key];
     Object.assign(this.data.tickets, data.tickets);
+    this.bumpSettingsGeneration();
     this.restartCheckInterval();
     this.requestSync();
+  }
+
+  /** Records written before this call are stale; a sync pass running now must not save them. */
+  bumpSettingsGeneration(): void {
+    this.settingsGeneration++;
+  }
+
+  /**
+   * Change the label name. Tracked tickets keep the old name in their record until a sync
+   * takes the old label off; then the new label goes on those with unfinished items.
+   */
+  async renameLabel(name: string): Promise<void> {
+    const oldName = this.settings.labelName;
+    if (name === oldName) return;
+    for (const record of Object.values(this.data.tickets)) record.labelName ??= oldName;
+    this.settings.labelName = name;
+    this.bumpSettingsGeneration();
+    await this.saveSettings();
+    this.requestSync();
+  }
+
+  /** Run a callback later; cancelled if the plugin unloads first. */
+  schedule(callback: () => void, delayMs: number): void {
+    const id = window.setTimeout(() => {
+      this.timers.delete(id);
+      callback();
+    }, delayMs);
+    this.timers.add(id);
   }
 
   createClient(apiKey: string): LinearWorkspaceClient {
@@ -123,7 +159,7 @@ export default class FlowLinearPlugin extends Plugin {
   }
 
   requestSync(): void {
-    if (!this.flowApi) return;
+    if (!this.flowApi || !this.syncAllowed) return;
     this.runner.requestSync().catch((error) => console.error("Flow Linear sync failed", error));
   }
 
@@ -159,13 +195,22 @@ export default class FlowLinearPlugin extends Plugin {
     }
     this.flowApi = api;
     this.unsubscribeFromFocus = api.onFocusChange(SOURCE_NAME, () => this.requestSyncSoon());
-    this.requestSync();
+    this.startupTimer = window.setTimeout(() => {
+      this.startupTimer = null;
+      this.syncAllowed = true;
+      this.requestSync();
+    }, STARTUP_SYNC_DELAY_MS);
   }
 
   private disconnect(): void {
     this.unsubscribeFromFocus?.();
     this.unsubscribeFromFocus = null;
     this.flowApi = null;
+    this.syncAllowed = false;
+    if (this.startupTimer !== null) {
+      window.clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
     if (this.changeTimer !== null) {
       window.clearTimeout(this.changeTimer);
       this.changeTimer = null;

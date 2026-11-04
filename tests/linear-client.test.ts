@@ -5,7 +5,12 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { requestUrl } from "obsidian";
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
-import { LINEAR_GRAPHQL_URL, LinearClient, LinearError } from "../src/linear-client";
+import {
+  LINEAR_GRAPHQL_URL,
+  LinearClient,
+  LinearError,
+  REQUEST_TIMEOUT_MS,
+} from "../src/linear-client";
 
 const mockRequestUrl = requestUrl as unknown as jest.Mock<
   Promise<RequestUrlResponse>,
@@ -79,7 +84,7 @@ describe("getOrganization", () => {
 describe("getLabelledTickets", () => {
   it("follows pagination and parses tickets", async () => {
     serve([200, "labelled-page-1"], [200, "labelled-page-2"]);
-    const tickets = await client.getLabelledTickets("label-uuid-1");
+    const tickets = await client.getLabelledTickets("label-uuid-1", ["label-uuid-1"]);
 
     expect(tickets).toEqual([
       {
@@ -104,20 +109,23 @@ describe("getLabelledTickets", () => {
     expect(sentBody(0).variables).toEqual({
       filter: { labels: { id: { eq: "label-uuid-1" } } },
       after: null,
+      labelIds: ["label-uuid-1"],
     });
+    // Only the plugin's labels are read from each ticket
+    expect(sentBody(0).query).toContain("labels(filter: { id: { in: $labelIds } })");
     expect(sentBody(1).variables.after).toBe("cursor-1");
   });
 });
 
 describe("getTicketsByIds", () => {
   it("asks for nothing when there are no ids", async () => {
-    await expect(client.getTicketsByIds([])).resolves.toEqual([]);
+    await expect(client.getTicketsByIds([], [])).resolves.toEqual([]);
     expect(mockRequestUrl).not.toHaveBeenCalled();
   });
 
   it("filters by id and reports trashed tickets", async () => {
     serve([200, "tracked-with-trashed"]);
-    const tickets = await client.getTicketsByIds(["a", "0b5c3e0a-1111-4c55-9a1e-000000000003"]);
+    const tickets = await client.getTicketsByIds(["a", "0b5c3e0a-1111-4c55-9a1e-000000000003"], []);
     expect(tickets).toHaveLength(1);
     expect(tickets[0].trashed).toBe(true);
     expect(sentBody(0).variables.filter).toEqual({
@@ -127,38 +135,27 @@ describe("getTicketsByIds", () => {
 
   it("returns an empty list when none of the tickets exist", async () => {
     serve([200, "no-issues"]);
-    await expect(client.getTicketsByIds(["gone"])).resolves.toEqual([]);
-  });
-});
-
-describe("getTicketsByIdentifiers", () => {
-  it("filters by team key and number", async () => {
-    serve([200, "labelled-page-2"]);
-    await client.getTicketsByIdentifiers(["TST-2", "ENG2-14"]);
-    expect(sentBody(0).variables.filter).toEqual({
-      or: [
-        { team: { key: { eq: "TST" } }, number: { eq: 2 } },
-        { team: { key: { eq: "ENG2" } }, number: { eq: 14 } },
-      ],
-    });
-  });
-
-  it("skips malformed identifiers and asks for nothing if none are left", async () => {
-    await expect(client.getTicketsByIdentifiers(["nonsense", "-3"])).resolves.toEqual([]);
-    expect(mockRequestUrl).not.toHaveBeenCalled();
+    await expect(client.getTicketsByIds(["gone"], [])).resolves.toEqual([]);
   });
 });
 
 describe("getTicketByIdentifier", () => {
-  it("returns the matching ticket", async () => {
-    serve([200, "labelled-page-2"]);
-    const ticket = await client.getTicketByIdentifier("TST-2");
-    expect(ticket?.title).toBe("Fix the login page");
+  it("looks the ticket up by identifier, which Linear also accepts for old identifiers", async () => {
+    serve([200, "issue-found"]);
+    const ticket = await client.getTicketByIdentifier("OLD-2", ["label-uuid-1"]);
+    expect(ticket?.identifier).toBe("TST-2");
+    expect(sentBody(0).query).toContain("issue(id: $id)");
+    expect(sentBody(0).variables).toEqual({ id: "OLD-2", labelIds: ["label-uuid-1"] });
   });
 
-  it("returns null when the ticket doesn't exist", async () => {
-    serve([200, "no-issues"]);
-    await expect(client.getTicketByIdentifier("TST-99")).resolves.toBeNull();
+  it("returns null when Linear says there's no such ticket", async () => {
+    serve([400, "error-entity-not-found"]);
+    await expect(client.getTicketByIdentifier("TST-99", [])).resolves.toBeNull();
+  });
+
+  it("passes on other errors", async () => {
+    serve([400, "error-invalid-input"]);
+    expect((await linearError(client.getTicketByIdentifier("TST-1", []))).kind).toBe("api");
   });
 });
 
@@ -173,6 +170,13 @@ describe("labels", () => {
   it("returns null when the workspace has no such label", async () => {
     serve([200, "label-missing"]);
     await expect(client.findWorkspaceLabel("flow-focus")).resolves.toBeNull();
+  });
+
+  it("detects a team label with the name", async () => {
+    serve([200, "label-found"], [200, "label-missing"]);
+    await expect(client.hasTeamLabel("flow-focus")).resolves.toBe(true);
+    expect(sentBody(0).query).toContain("team: { null: false }");
+    await expect(client.hasTeamLabel("flow-focus")).resolves.toBe(false);
   });
 
   it("creates a workspace-level label without a team", async () => {
@@ -231,7 +235,7 @@ describe("errors", () => {
 
   it("maps other GraphQL errors to an api error with Linear's message", async () => {
     serve([400, "error-invalid-input"]);
-    const error = await linearError(client.getLabelledTickets("label-uuid-1"));
+    const error = await linearError(client.getLabelledTickets("label-uuid-1", []));
     expect(error.kind).toBe("api");
     expect(error.message).toBe("Argument Validation Error");
   });
@@ -241,6 +245,17 @@ describe("errors", () => {
     const error = await linearError(client.getOrganization());
     expect(error.kind).toBe("api");
     expect(error.message).toBe("Linear returned HTTP 502");
+  });
+
+  it("gives up on a request after 30 seconds", async () => {
+    jest.useFakeTimers();
+    mockRequestUrl.mockReturnValueOnce(new Promise(() => {}) as never);
+    const pending = linearError(client.getOrganization());
+    jest.advanceTimersByTime(REQUEST_TIMEOUT_MS);
+    const error = await pending;
+    expect(error.kind).toBe("network");
+    expect(error.message).toBe("Linear didn't answer within 30 seconds");
+    jest.useRealTimers();
   });
 
   it("maps a failed request to a network error", async () => {

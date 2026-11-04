@@ -16,6 +16,7 @@ export class FocusStore implements FlowApi {
   spheres = ["personal", "work"];
   writes: string[] = [];
   private callbacks = new Map<string, Set<FocusChangeCallback>>();
+  private unloaded = false;
   private nextId = 1;
 
   async addFocusItem(input: NewExternalFocusItem): Promise<string> {
@@ -95,6 +96,12 @@ export class FocusStore implements FlowApi {
     return () => callbacks.delete(callback);
   }
 
+  /** Act as Flow does once unloaded: callbacks go, and writes reject. */
+  unload(): void {
+    this.unloaded = true;
+    this.callbacks.clear();
+  }
+
   listenerCount(sourceName: string): number {
     return this.callbacks.get(sourceName)?.size ?? 0;
   }
@@ -110,6 +117,9 @@ export class FocusStore implements FlowApi {
     change: (items: ExternalFocusItem[]) => ExternalFocusItem[],
     itemId?: string
   ): void {
+    if (this.unloaded) {
+      throw new Error("Flow has been unloaded; get the API again once Flow is ready");
+    }
     if (itemId !== undefined && !this.items.some((item) => item.id === itemId)) {
       throw new Error(`No Focus item with id ${itemId}`);
     }

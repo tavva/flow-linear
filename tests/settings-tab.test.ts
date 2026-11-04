@@ -25,8 +25,11 @@ function unload(plugin: FlowLinearPlugin): void {
 }
 
 async function setUp() {
+  const local = new Map<string, unknown>();
   const app = {
     workspace: Object.assign(new Events(), { onLayoutReady: () => {} }),
+    loadLocalStorage: (key: string) => local.get(key) ?? null,
+    saveLocalStorage: (key: string, value: unknown) => local.set(key, value),
     secretStorage: { getSecret: () => null },
   };
   const plugin = new FlowLinearPlugin(app as never, {} as never);
@@ -64,14 +67,16 @@ describe("FlowLinearSettingTab", () => {
     unload(plugin);
   });
 
-  it("deletes a workspace and saves", async () => {
+  it("deletes a workspace from the current list and saves", async () => {
     const { group, plugin, tab } = await setUp();
     const save = jest.spyOn(plugin, "saveSettings");
-    group("Workspaces").onDelete?.(0);
-    await Promise.resolve();
-    expect(plugin.settings.workspaces.map((w) => w.urlKey)).toEqual(["otherco"]);
+    const list = group("Workspaces");
+    // Settings reloaded from another device after the tab was drawn
+    plugin.settings.workspaces = [workspace("testco"), workspace("thirdco")];
+    list.onDelete?.(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(plugin.settings.workspaces.map((w) => w.urlKey)).toEqual(["testco"]);
     expect(save).toHaveBeenCalled();
-    await Promise.resolve();
     expect((tab as unknown as { updates: number }).updates).toBe(1);
     unload(plugin);
   });
@@ -84,36 +89,72 @@ describe("FlowLinearSettingTab", () => {
     unload(plugin);
   });
 
-  it("stores the label name, refusing an empty one", async () => {
-    const { tab, plugin, group } = await setUp();
-    const labelControl = group("Sync").items[0].control;
-    expect(labelControl?.key).toBe("labelName");
-    expect(labelControl?.validate?.("  ")).toBe("Enter a label name.");
-    expect(labelControl?.validate?.("ben-focus")).toBeUndefined();
+  it("renames the label only when the field is left or Enter is pressed", async () => {
+    const { plugin, group } = await setUp();
+    const rename = jest.spyOn(plugin, "renameLabel");
+    const setting = new Setting(new FakeElement());
+    group("Sync").items[0].render?.(setting);
+    const text = setting.texts[0];
+    expect(text.value).toBe("flow-focus");
 
-    await tab.setControlValue("labelName", "  ben-focus ");
-    expect(tab.getControlValue("labelName")).toBe("ben-focus");
-    await tab.setControlValue("labelName", "");
-    expect(plugin.settings.labelName).toBe("ben-focus");
+    text.type("b");
+    text.type("be");
+    text.type("ben-focus");
+    expect(rename).not.toHaveBeenCalled();
+
+    text.inputEl.dispatch("blur", {});
+    expect(rename).toHaveBeenCalledWith("ben-focus");
+    text.type(" other ");
+    text.inputEl.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    expect(rename).toHaveBeenLastCalledWith("other");
     unload(plugin);
   });
 
-  it("marks every tracked ticket for the new label when the label is renamed", async () => {
-    const { tab, plugin } = await setUp();
+  it("puts the current name back when the field is left empty", async () => {
+    const { plugin, group } = await setUp();
+    const rename = jest.spyOn(plugin, "renameLabel");
+    const setting = new Setting(new FakeElement());
+    group("Sync").items[0].render?.(setting);
+    setting.texts[0].type("  ");
+    setting.texts[0].inputEl.dispatch("blur", {});
+    expect(rename).not.toHaveBeenCalled();
+    expect(setting.texts[0].value).toBe("flow-focus");
+    unload(plugin);
+  });
+
+  it("keeps the old label on each record so it comes off before the new one goes on", async () => {
+    const { plugin } = await setUp();
     const sync = jest.spyOn(plugin, "requestSync");
     plugin.data.tickets["testco/TST-1"] = { issueId: "uuid-1", label: "synced" };
     plugin.data.tickets["testco/TST-2"] = { issueId: "uuid-2", label: "remove-pending" };
+    plugin.data.tickets["testco/TST-3"] = {
+      issueId: "uuid-3",
+      label: "synced",
+      labelName: "older",
+    };
 
-    await tab.setControlValue("labelName", "flow-focus");
-    expect(plugin.data.tickets["testco/TST-1"].label).toBe("synced");
+    await plugin.renameLabel("flow-focus");
+    expect(plugin.data.tickets["testco/TST-1"]).toEqual({ issueId: "uuid-1", label: "synced" });
     expect(sync).not.toHaveBeenCalled();
 
-    await tab.setControlValue("labelName", "ben-focus");
+    await plugin.renameLabel("ben-focus");
+    expect(plugin.settings.labelName).toBe("ben-focus");
     expect(plugin.data.tickets).toEqual({
-      "testco/TST-1": { issueId: "uuid-1", label: "add-pending" },
-      "testco/TST-2": { issueId: "uuid-2", label: "add-pending" },
+      "testco/TST-1": { issueId: "uuid-1", label: "synced", labelName: "flow-focus" },
+      "testco/TST-2": { issueId: "uuid-2", label: "remove-pending", labelName: "flow-focus" },
+      "testco/TST-3": { issueId: "uuid-3", label: "synced", labelName: "older" },
     });
     expect(sync).toHaveBeenCalled();
+    unload(plugin);
+  });
+
+  it("makes a pass already running unable to save records from before the rename", async () => {
+    const { plugin } = await setUp();
+    const generation = (plugin as unknown as { settingsGeneration: number }).settingsGeneration;
+    await plugin.renameLabel("ben-focus");
+    expect((plugin as unknown as { settingsGeneration: number }).settingsGeneration).toBe(
+      generation + 1
+    );
     unload(plugin);
   });
 
@@ -134,6 +175,7 @@ describe("FlowLinearSettingTab", () => {
     const { tab, plugin } = await setUp();
     const save = jest.spyOn(plugin, "saveSettings");
     await tab.setControlValue("other", "x");
+    await tab.setControlValue("labelName", "x");
     expect(tab.getControlValue("other")).toBeUndefined();
     expect(save).not.toHaveBeenCalled();
     unload(plugin);
@@ -157,7 +199,9 @@ describe("old Flow warning", () => {
     expect(warning.visible).toBe(true);
     expect(warning.cls).toBe("flow-linear-warning");
     expect(warning.items[0].desc).toBe(OLD_FLOW_WARNING);
-    expect(OLD_FLOW_WARNING).toContain("Flow 1.3.12 and earlier");
+    // Says plainly what an old Flow does: items go, and so do labels
+    expect(OLD_FLOW_WARNING).toContain("Flow 1.3.12 or earlier, it will delete your Linear items");
+    expect(OLD_FLOW_WARNING).toContain("take the label off those tickets");
 
     const setting = new Setting(new FakeElement());
     warning.items[0].render?.(setting);

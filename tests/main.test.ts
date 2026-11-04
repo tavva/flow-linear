@@ -2,7 +2,7 @@
 // ABOUTME: debouncing Focus changes into syncs, the add-ticket command and clean-up on unload.
 
 import { Events, Modal, Notice } from "obsidian";
-import FlowLinearPlugin, { FLOW_WITHOUT_API_NOTICE } from "../src/main";
+import FlowLinearPlugin, { FLOW_WITHOUT_API_NOTICE, STARTUP_SYNC_DELAY_MS } from "../src/main";
 import { AddTicketModal } from "../src/add-ticket-modal";
 import { FlowApi } from "../src/flow-api";
 import { focusItem } from "./helpers/builders";
@@ -21,8 +21,11 @@ class FakeWorkspace extends Events {
 function setUp(flow: FlowApi | null = new FocusStore(), flowWithoutApi = false) {
   const workspace = new FakeWorkspace();
   const state = { flow, flowWithoutApi };
+  const local = new Map<string, unknown>();
   const app = {
     workspace,
+    loadLocalStorage: (key: string) => local.get(key) ?? null,
+    saveLocalStorage: (key: string, value: unknown) => local.set(key, value),
     secretStorage: { getSecret: (name: string) => (name === "linear-testco" ? "key" : null) },
     plugins: {
       getPlugin: (id: string) => {
@@ -33,13 +36,15 @@ function setUp(flow: FlowApi | null = new FocusStore(), flowWithoutApi = false) 
     },
   };
   const plugin = new FlowLinearPlugin(app as never, {} as never);
-  return { plugin, workspace, state };
+  return { plugin, workspace, state, local };
 }
 
-async function load(plugin: FlowLinearPlugin, workspace: FakeWorkspace) {
+/** Load the plugin and let the layout get ready; by default also wait out the startup delay. */
+async function load(plugin: FlowLinearPlugin, workspace: FakeWorkspace, waitForStartup = true) {
   await plugin.onload();
   const requestSync = jest.spyOn(plugin.runner, "requestSync").mockResolvedValue();
   workspace.layoutReady();
+  if (waitForStartup) jest.advanceTimersByTime(STARTUP_SYNC_DELAY_MS);
   return requestSync;
 }
 
@@ -54,12 +59,19 @@ afterEach(() => {
 });
 
 describe("finding Flow", () => {
-  it("connects once the layout is ready and syncs straight away", async () => {
+  it("connects once the layout is ready and first syncs after the startup delay", async () => {
     const { plugin, workspace, state } = setUp();
-    const requestSync = await load(plugin, workspace);
+    const requestSync = await load(plugin, workspace, false);
 
     expect(plugin.flowApi).toBe(state.flow);
     expect((state.flow as FocusStore).listenerCount("linear")).toBe(1);
+    // Neither a Focus change nor a direct request syncs before the delay is up
+    (state.flow as FocusStore).replaceAll([focusItem("TST-1")]);
+    jest.advanceTimersByTime(STARTUP_SYNC_DELAY_MS - 1);
+    plugin.requestSync();
+    expect(requestSync).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(1);
     expect(requestSync).toHaveBeenCalledTimes(1);
   });
 
@@ -99,6 +111,7 @@ describe("finding Flow", () => {
     const second = new FocusStore();
     state.flow = second;
     workspace.trigger("flow:api-ready", second);
+    jest.advanceTimersByTime(STARTUP_SYNC_DELAY_MS);
     expect(plugin.flowApi).toBe(second);
     expect(second.listenerCount("linear")).toBe(1);
     expect(requestSync).toHaveBeenCalledTimes(2);
@@ -232,6 +245,24 @@ describe("data and secrets", () => {
     );
   });
 
+  it("keeps what this device has seen in local storage, not in data.json", async () => {
+    const { plugin, workspace, local } = setUp();
+    await load(plugin, workspace);
+    plugin.runner.markSeenUnfinished("testco/TST-1");
+    expect(local.get("flow-linear-seen-unfinished")).toEqual(["testco/TST-1"]);
+    await plugin.saveSettings();
+    expect(JSON.stringify((plugin as unknown as { stored: unknown }).stored)).not.toContain(
+      "TST-1"
+    );
+
+    // A restarted plugin picks it up again
+    const again = new FlowLinearPlugin(plugin.app, {} as never);
+    await again.onload();
+    again.runner.markSeenUnfinished("testco/TST-2");
+    expect(local.get("flow-linear-seen-unfinished")).toEqual(["testco/TST-1", "testco/TST-2"]);
+    (again as unknown as { unload(): void }).unload();
+  });
+
   it("reads secrets from SecretStorage and treats an empty name as no key", async () => {
     const { plugin, workspace } = setUp();
     await load(plugin, workspace);
@@ -278,6 +309,20 @@ describe("unload", () => {
 
     expect(store.listenerCount("linear")).toBe(0);
     expect(requestSync).not.toHaveBeenCalled();
+  });
+
+  it("runs scheduled callbacks, and cancels them on unload", async () => {
+    const { plugin, workspace } = setUp();
+    await load(plugin, workspace);
+    const ran: string[] = [];
+    plugin.schedule(() => ran.push("first"), 1000);
+    plugin.schedule(() => ran.push("second"), 5000);
+    jest.advanceTimersByTime(1000);
+    expect(ran).toEqual(["first"]);
+
+    (plugin as unknown as { unload(): void }).unload();
+    jest.advanceTimersByTime(10_000);
+    expect(ran).toEqual(["first"]);
   });
 
   it("stops the sync runner", async () => {

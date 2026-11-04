@@ -8,7 +8,7 @@ import { WorkspaceStatus } from "./sync-runner";
 import { WorkspaceModal } from "./workspace-modal";
 
 export const OLD_FLOW_WARNING =
-  "Flow 1.3.12 and earlier remove Focus items added by other plugins whenever their Focus view refreshes, and that removal syncs to your other devices. Update Flow on every device that syncs this vault before using Flow Linear.";
+  "If any device that syncs this vault runs Flow 1.3.12 or earlier, it will delete your Linear items from Focus, that deletion syncs to every device, and Flow Linear will then take the label off those tickets in Linear. Update Flow on every device before using Flow Linear.";
 
 export function describeStatus(status: WorkspaceStatus): string {
   if (status.error) return `Last error: ${status.error}`;
@@ -50,10 +50,7 @@ export class FlowLinearSettingTab extends PluginSettingTab {
         heading: "Workspaces",
         emptyState: "No Linear workspaces yet.",
         addItem: { name: "Add workspace", action: () => this.openWorkspaceModal() },
-        onDelete: (index) => {
-          workspaces.splice(index, 1);
-          void this.plugin.saveSettings().then(() => this.update());
-        },
+        onDelete: (index) => void this.deleteWorkspace(index),
         items: workspaces.map((workspace) => ({
           name: workspace.displayName,
           desc: `${workspace.urlKey} · default sphere: ${workspace.defaultSphere || "Flow's first sphere"}`,
@@ -65,12 +62,27 @@ export class FlowLinearSettingTab extends PluginSettingTab {
         items: [
           {
             name: "Label name",
-            desc: "The Linear label that marks tickets in Focus. The same name is used in every workspace.",
-            control: {
-              type: "text",
-              key: "labelName",
-              placeholder: DEFAULT_LABEL_NAME,
-              validate: (value) => (value.trim() === "" ? "Enter a label name." : undefined),
+            desc: "The Linear label that marks tickets in Focus. The same name is used in every workspace. Changes apply when you leave the field or press Enter.",
+            // Drawn by hand so a rename happens once, on commit, not on every keystroke
+            render: (setting) => {
+              setting.addText((text) => {
+                text.setPlaceholder(DEFAULT_LABEL_NAME).setValue(this.plugin.settings.labelName);
+                const commit = () => {
+                  const name = text.getValue().trim();
+                  if (name === "") {
+                    text.setValue(this.plugin.settings.labelName);
+                    return;
+                  }
+                  void this.plugin.renameLabel(name);
+                };
+                text.inputEl.addEventListener("blur", commit);
+                text.inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commit();
+                  }
+                });
+              });
             },
           },
           {
@@ -100,28 +112,23 @@ export class FlowLinearSettingTab extends PluginSettingTab {
   }
 
   getControlValue(key: string): unknown {
-    const { settings } = this.plugin;
-    if (key === "labelName") return settings.labelName;
-    if (key === "checkIntervalMinutes") return settings.checkIntervalMinutes;
+    if (key === "checkIntervalMinutes") return this.plugin.settings.checkIntervalMinutes;
     return undefined;
   }
 
   async setControlValue(key: string, value: unknown): Promise<void> {
-    const { settings } = this.plugin;
-    if (key === "labelName" && typeof value === "string" && value.trim() !== "") {
-      if (value.trim() === settings.labelName) return;
-      settings.labelName = value.trim();
-      // No ticket carries the new label yet; put it on every tracked ticket that still has
-      // unfinished items, rather than reading its absence as removal in Linear
-      for (const record of Object.values(this.plugin.data.tickets)) record.label = "add-pending";
-      this.plugin.requestSync();
-    } else if (key === "checkIntervalMinutes" && typeof value === "number") {
-      settings.checkIntervalMinutes = clampInterval(value);
-      this.plugin.restartCheckInterval();
-    } else {
-      return;
-    }
+    if (key !== "checkIntervalMinutes" || typeof value !== "number") return;
+    this.plugin.settings.checkIntervalMinutes = clampInterval(value);
+    this.plugin.restartCheckInterval();
     await this.plugin.saveSettings();
+  }
+
+  // Reads the list at the time of the click, not when the tab was drawn
+  private async deleteWorkspace(index: number): Promise<void> {
+    this.plugin.settings.workspaces.splice(index, 1);
+    this.plugin.bumpSettingsGeneration();
+    await this.plugin.saveSettings();
+    this.update();
   }
 
   private async dismissOldFlowWarning(): Promise<void> {

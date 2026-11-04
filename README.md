@@ -32,12 +32,13 @@ adds another step.
 
 ## Setting up
 
-> **Update Flow on every device first.** Flow 1.3.12 and earlier remove Focus
-> items added by other plugins whenever their Focus view refreshes, and that
-> removal syncs to your other devices. Before installing Flow Linear, update Flow
-> on every device that syncs this vault, including ones where you won't install
-> Flow Linear. Flow Linear refuses to sync on a device whose Flow is too old, but
-> it can't see the other devices.
+> **Update Flow on every device first.** If any device that syncs this vault runs
+> Flow 1.3.12 or earlier, it will delete your Linear items from Focus whenever its
+> Focus view refreshes. That deletion syncs to every device, and Flow Linear will
+> then take the label off those tickets in Linear. Before installing Flow Linear,
+> update Flow on every device that syncs this vault, including ones where you won't
+> install Flow Linear. Flow Linear refuses to sync on a device whose Flow is too
+> old, but it can't see the other devices.
 
 1. In Linear's settings, under Security & access, create a personal API key.
 2. In Obsidian, open **Settings → Flow Linear** and click **Add workspace**.
@@ -67,10 +68,12 @@ Obsidian Sync, "Installed community plugins" settings). Turn that on when Flow
 Linear runs on more than one device; without it, each device keeps its own records
 and they can disagree.
 
-Because one device's focus file can lag behind another's, Flow Linear waits before
-acting on what it sees in Focus alone. It takes a label off only when a check at
-least 30 seconds after the first still finds no unfinished item, and it adds the
-label for an item that arrived from another device the same way.
+Because one device's files can lag behind another's, Flow Linear waits before
+acting on what it sees in Focus alone. It first checks 30 seconds after starting.
+It imports a newly labelled ticket, adds the label for an item from another
+device, takes a label off, or removes items after the label went in Linear only
+when a check at least 30 seconds later still calls for it. A device takes a label
+off because items went only if it saw those items itself.
 
 ## Network use
 
@@ -83,8 +86,8 @@ using the API keys you enter. It sends requests:
   the tickets that carry the label and the tickets Flow Linear is tracking, and to
   add or remove the label on them.
 
-It reads ticket IDs, titles, links, states and label names, and changes only the one
-label. It never edits or creates tickets. Nothing is sent anywhere else: no
+It reads ticket IDs, titles, links and states, and whether each ticket carries its
+own label. It changes only that one label. It never edits or creates tickets. Nothing is sent anywhere else: no
 telemetry, analytics or ads.
 
 ## What it stores

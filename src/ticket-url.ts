@@ -32,13 +32,3 @@ export function parseTicketUrl(input: string): TicketRef | null {
 export function ticketKey(ref: TicketRef): string {
   return `${ref.urlKey}/${ref.identifier}`;
 }
-
-/** Split an identifier such as "ABC-123" into its team key and number. */
-export function splitIdentifier(identifier: string): { teamKey: string; number: number } | null {
-  if (!IDENTIFIER_PATTERN.test(identifier)) return null;
-  const dash = identifier.lastIndexOf("-");
-  return {
-    teamKey: identifier.slice(0, dash).toUpperCase(),
-    number: Number(identifier.slice(dash + 1)),
-  };
-}

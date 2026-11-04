@@ -13,6 +13,7 @@ export interface AddTicketDeps {
   getSecret(name: string): string | null;
   createClient(apiKey: string): LinearWorkspaceClient;
   requestSync(): void;
+  markSeenUnfinished(ticketKey: string): void;
 }
 
 export interface FoundTicket {
@@ -58,7 +59,7 @@ export class AddTicket {
 
     let ticket: LinearTicket | null;
     try {
-      ticket = await this.deps.createClient(apiKey).getTicketByIdentifier(ref.identifier);
+      ticket = await this.deps.createClient(apiKey).getTicketByIdentifier(ref.identifier, []);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, error: `Couldn't fetch the ticket from Linear: ${message}` };
@@ -94,11 +95,15 @@ export class AddTicket {
       return `Couldn't add the ticket to Focus: ${message}`;
     }
 
+    // Always pending, even if synced: the label may have been removed in Linear since the last
+    // pass, and the next pass must add it back rather than remove the item just added
     const { tickets } = this.deps.getData();
-    if (tickets[found.ticketKey]?.label !== "synced") {
-      tickets[found.ticketKey] = { issueId: found.ticket.id, label: "add-pending" };
-      await this.deps.saveData();
-    }
+    const existing = tickets[found.ticketKey];
+    tickets[found.ticketKey] = existing?.labelName
+      ? { issueId: found.ticket.id, label: "add-pending", labelName: existing.labelName }
+      : { issueId: found.ticket.id, label: "add-pending" };
+    this.deps.markSeenUnfinished(found.ticketKey);
+    await this.deps.saveData();
     this.deps.requestSync();
     return null;
   }

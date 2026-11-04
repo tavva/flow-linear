@@ -14,7 +14,7 @@ function setUp() {
   const data = readStoredData(null);
   data.settings.workspaces = [workspace()];
   const secrets = new Map([["linear-testco", "key"]]);
-  const state = { flow: focus as FlowApi | null, syncs: 0, saves: 0 };
+  const state = { flow: focus as FlowApi | null, syncs: 0, saves: 0, seen: [] as string[] };
   const addTicket = new AddTicket({
     getFlowApi: () => state.flow,
     getData: () => data,
@@ -26,6 +26,7 @@ function setUp() {
     requestSync: () => {
       state.syncs++;
     },
+    markSeenUnfinished: (key) => state.seen.push(key),
   });
   return { focus, linear, data, secrets, state, addTicket };
 }
@@ -137,7 +138,7 @@ describe("add", () => {
     expect(state.syncs).toBe(1);
   });
 
-  it("adds another step for a ticket already in Focus and leaves a synced record alone", async () => {
+  it("adds another step for a ticket already in Focus and marks even a synced label pending", async () => {
     const { addTicket, linear, focus, data, state } = setUp();
     linear.tickets = [labelled("TST-4")];
     data.tickets["testco/TST-4"] = { issueId: "uuid-testco-TST-4", label: "synced" };
@@ -147,8 +148,30 @@ describe("add", () => {
     await addTicket.add(result, "Step two", "work");
 
     expect(focus.items.map((i) => i.text)).toEqual(["Step one", "Step two"]);
-    expect(data.tickets["testco/TST-4"].label).toBe("synced");
-    expect(state.saves).toBe(0);
+    // The label may have come off in Linear since the last pass; pending makes the next pass
+    // put it back rather than remove the new item
+    expect(data.tickets["testco/TST-4"]).toEqual({
+      issueId: "uuid-testco-TST-4",
+      label: "add-pending",
+    });
+    expect(state.seen).toEqual(["testco/TST-4", "testco/TST-4"]);
+  });
+
+  it("keeps a renamed-away label on the record so it still comes off", async () => {
+    const { addTicket, linear, data } = setUp();
+    linear.tickets = [labelled("TST-4")];
+    data.tickets["testco/TST-4"] = {
+      issueId: "uuid-testco-TST-4",
+      label: "synced",
+      labelName: "old-focus",
+    };
+    const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
+    await addTicket.add(result, "Step", "work");
+    expect(data.tickets["testco/TST-4"]).toEqual({
+      issueId: "uuid-testco-TST-4",
+      label: "add-pending",
+      labelName: "old-focus",
+    });
   });
 
   it("refuses empty wording or sphere and saves nothing", async () => {

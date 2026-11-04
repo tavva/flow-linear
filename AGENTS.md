@@ -46,10 +46,13 @@ npm run release       # Production release workflow
 
 Flow reports Flow Linear's own writes back as change events, and coalesces
 changes, so a sync must be safe to run at any time and do nothing when nothing
-has changed. Treat `removed` events and missing items as hints: the label comes
-off only when a pass at least `REMOVAL_CONFIRM_DELAY_MS` after the first still
-finds no unfinished item. Adding the label for an item with no record (one from
-another device) waits the same way.
+has changed. Treat `removed` events and missing items as hints: imports, label
+adds for items from another device, label removals and item removals all wait
+for a pass at least `CONFIRM_DELAY_MS` later to call for them again (the
+`await` action). A device removes a label because items went only if it saw
+them unfinished itself (kept in local storage, not `data.json`). The first sync
+waits `STARTUP_SYNC_DELAY_MS` after connecting to Flow. Design:
+"Confirmation" and rule 5.
 
 "Labelled" means carrying the workspace-level label's id, never a label matched by
 name. A linked item whose ticket Linear doesn't return and that has no record is
