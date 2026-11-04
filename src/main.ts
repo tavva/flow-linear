@@ -5,6 +5,7 @@ import { Events, Notice, Plugin } from "obsidian";
 import { AddTicket } from "./add-ticket";
 import { AddTicketModal } from "./add-ticket-modal";
 import {
+  findFlow,
   findFlowApi,
   FLOW_API_READY_EVENT,
   FLOW_API_UNLOADED_EVENT,
@@ -19,6 +20,9 @@ import { SyncRunner } from "./sync-runner";
 
 // Focus changes arrive in bursts; wait for them to settle before syncing
 const CHANGE_SYNC_DELAY_MS = 2000;
+
+export const FLOW_WITHOUT_API_NOTICE =
+  "This version of Flow is too old for Flow Linear, so Flow Linear won't sync. Update Flow on every device that syncs this vault.";
 
 export default class FlowLinearPlugin extends Plugin {
   data: FlowLinearData = readStoredData(null);
@@ -66,7 +70,8 @@ export default class FlowLinearPlugin extends Plugin {
       callback: () => {
         const api = this.flowApi;
         if (!api) {
-          new Notice("Flow isn't enabled");
+          const tooOld = findFlow(this.app).status === "no-api";
+          new Notice(tooOld ? FLOW_WITHOUT_API_NOTICE : "Flow isn't enabled");
           return;
         }
         new AddTicketModal(this.app, addTicket, () => api.getSpheres()).open();
@@ -81,7 +86,7 @@ export default class FlowLinearPlugin extends Plugin {
       })
     );
     this.registerEvent(workspaceEvents.on(FLOW_API_UNLOADED_EVENT, () => this.disconnect()));
-    this.app.workspace.onLayoutReady(() => this.connect(findFlowApi(this.app)));
+    this.app.workspace.onLayoutReady(() => this.connectToInstalledFlow());
 
     this.restartCheckInterval();
   }
@@ -117,6 +122,17 @@ export default class FlowLinearPlugin extends Plugin {
       this.settings.checkIntervalMinutes * 60_000
     );
     this.registerInterval(this.checkInterval);
+  }
+
+  /** Connect to Flow as it is now, warning if it's a version without the Focus API. */
+  private connectToInstalledFlow(): void {
+    const lookup = findFlow(this.app);
+    if (lookup.status === "no-api") {
+      // Flow 1.3.12 and earlier also remove external Focus items; nothing here can sync safely
+      new Notice(FLOW_WITHOUT_API_NOTICE, 0);
+      return;
+    }
+    if (lookup.status === "found") this.connect(lookup.api);
   }
 
   private connect(api: FlowApi | null): void {

@@ -19,3 +19,7 @@
 .flow-linear-wording {
   width: 100%;
 }
+
+.flow-linear-warning .setting-item-description {
+  color: var(--text-warning);
+}

@@ -32,6 +32,13 @@ adds another step.
 
 ## Setting up
 
+> **Update Flow on every device first.** Flow 1.3.12 and earlier remove Focus
+> items added by other plugins whenever their Focus view refreshes, and that
+> removal syncs to your other devices. Before installing Flow Linear, update Flow
+> on every device that syncs this vault, including ones where you won't install
+> Flow Linear. Flow Linear refuses to sync on a device whose Flow is too old, but
+> it can't see the other devices.
+
 1. In Linear's settings, under Security & access, create a personal API key.
 2. In Obsidian, open **Settings → Flow Linear** and click **Add workspace**.
 3. Choose or create a secret for the API key. Flow Linear checks the key with Linear

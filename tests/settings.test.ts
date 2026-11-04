@@ -10,6 +10,7 @@ describe("readStoredData", () => {
       workspaces: [],
       labelName: "flow-focus",
       checkIntervalMinutes: 5,
+      oldFlowWarningDismissed: false,
     });
   });
 
@@ -26,6 +27,7 @@ describe("readStoredData", () => {
         ],
         labelName: "ben-focus",
         checkIntervalMinutes: 10,
+        oldFlowWarningDismissed: true,
       },
       tickets: { "acme/ABC-1": { issueId: "uuid-1", label: "add-pending" } },
     };

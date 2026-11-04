@@ -2,7 +2,7 @@
 // ABOUTME: debouncing Focus changes into syncs, the add-ticket command and clean-up on unload.
 
 import { Events, Modal, Notice } from "obsidian";
-import FlowLinearPlugin from "../src/main";
+import FlowLinearPlugin, { FLOW_WITHOUT_API_NOTICE } from "../src/main";
 import { AddTicketModal } from "../src/add-ticket-modal";
 import { FlowApi } from "../src/flow-api";
 import { focusItem } from "./helpers/builders";
@@ -18,14 +18,18 @@ class FakeWorkspace extends Events {
   }
 }
 
-function setUp(flow: FlowApi | null = new FocusStore()) {
+function setUp(flow: FlowApi | null = new FocusStore(), flowWithoutApi = false) {
   const workspace = new FakeWorkspace();
-  const state = { flow };
+  const state = { flow, flowWithoutApi };
   const app = {
     workspace,
     secretStorage: { getSecret: (name: string) => (name === "linear-testco" ? "key" : null) },
     plugins: {
-      getPlugin: (id: string) => (id === "flow" && state.flow ? { api: state.flow } : null),
+      getPlugin: (id: string) => {
+        if (id !== "flow") return null;
+        if (state.flowWithoutApi) return {};
+        return state.flow ? { api: state.flow } : null;
+      },
     },
   };
   const plugin = new FlowLinearPlugin(app as never, {} as never);
@@ -71,6 +75,16 @@ describe("finding Flow", () => {
     expect(Notice.messages).toEqual([
       "This version of Flow isn't supported by Flow Linear. Update both plugins.",
     ]);
+  });
+
+  it("refuses to sync with a Flow that has no Focus API, and says so", async () => {
+    const { plugin, workspace } = setUp(null, true);
+    const requestSync = await load(plugin, workspace);
+    jest.advanceTimersByTime(10 * 60_000);
+
+    expect(plugin.flowApi).toBeNull();
+    expect(requestSync).not.toHaveBeenCalled();
+    expect(Notice.messages).toEqual([FLOW_WITHOUT_API_NOTICE]);
   });
 
   it("follows Flow being unloaded and loaded again", async () => {
@@ -178,6 +192,15 @@ describe("add-ticket command", () => {
     await load(plugin, workspace);
     (plugin as unknown as { commands: { callback(): void }[] }).commands[0].callback();
     expect(Notice.messages).toEqual(["Flow isn't enabled"]);
+    expect(Modal.opened).toEqual([]);
+  });
+
+  it("says Flow is too old when it has no Focus API", async () => {
+    const { plugin, workspace } = setUp(null, true);
+    await load(plugin, workspace);
+    Notice.messages = [];
+    (plugin as unknown as { commands: { callback(): void }[] }).commands[0].callback();
+    expect(Notice.messages).toEqual([FLOW_WITHOUT_API_NOTICE]);
     expect(Modal.opened).toEqual([]);
   });
 

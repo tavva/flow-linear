@@ -7,6 +7,9 @@ import { clampInterval, DEFAULT_LABEL_NAME, MIN_CHECK_INTERVAL_MINUTES } from ".
 import { WorkspaceStatus } from "./sync-runner";
 import { WorkspaceModal } from "./workspace-modal";
 
+export const OLD_FLOW_WARNING =
+  "Flow 1.3.12 and earlier remove Focus items added by other plugins whenever their Focus view refreshes, and that removal syncs to your other devices. Update Flow on every device that syncs this vault before using Flow Linear.";
+
 export function describeStatus(status: WorkspaceStatus): string {
   if (status.error) return `Last error: ${status.error}`;
   if (status.lastSuccessAt) {
@@ -26,6 +29,22 @@ export class FlowLinearSettingTab extends PluginSettingTab {
   getSettingDefinitions(): SettingDefinitionItem[] {
     const { workspaces } = this.plugin.settings;
     return [
+      {
+        type: "group",
+        cls: "flow-linear-warning",
+        visible: !this.plugin.settings.oldFlowWarningDismissed,
+        items: [
+          {
+            name: "Update Flow on every device first",
+            desc: OLD_FLOW_WARNING,
+            render: (setting) => {
+              setting.addButton((button) =>
+                button.setButtonText("Dismiss").onClick(() => void this.dismissOldFlowWarning())
+              );
+            },
+          },
+        ],
+      },
       {
         type: "list",
         heading: "Workspaces",
@@ -98,6 +117,12 @@ export class FlowLinearSettingTab extends PluginSettingTab {
       return;
     }
     await this.plugin.saveSettings();
+  }
+
+  private async dismissOldFlowWarning(): Promise<void> {
+    this.plugin.settings.oldFlowWarningDismissed = true;
+    await this.plugin.saveSettings();
+    this.update();
   }
 
   private openWorkspaceModal(): void {

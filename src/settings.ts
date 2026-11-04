@@ -12,6 +12,7 @@ export interface FlowLinearSettings {
   workspaces: WorkspaceSettings[];
   labelName: string;
   checkIntervalMinutes: number;
+  oldFlowWarningDismissed: boolean; // The settings tab's warning about Flow 1.3.12 and earlier
 }
 
 export type LabelState = "synced" | "add-pending" | "remove-pending";
@@ -35,6 +36,7 @@ export function defaultSettings(): FlowLinearSettings {
     workspaces: [],
     labelName: DEFAULT_LABEL_NAME,
     checkIntervalMinutes: DEFAULT_CHECK_INTERVAL_MINUTES,
+    oldFlowWarningDismissed: false,
   };
 }
 
@@ -86,6 +88,9 @@ export function readStoredData(raw: unknown): FlowLinearData {
   }
   if (typeof storedSettings.checkIntervalMinutes === "number") {
     settings.checkIntervalMinutes = clampInterval(storedSettings.checkIntervalMinutes);
+  }
+  if (storedSettings.oldFlowWarningDismissed === true) {
+    settings.oldFlowWarningDismissed = true;
   }
 
   if (isRecord(raw.tickets)) {

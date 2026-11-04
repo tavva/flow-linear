@@ -65,11 +65,31 @@ export const FLOW_API_READY_EVENT = "flow:api-ready";
 export const FLOW_API_UNLOADED_EVENT = "flow:api-unloaded";
 
 interface PluginRegistry {
-  getPlugin(id: string): { api?: FlowApi } | null;
+  getPlugin(id: string): { api?: unknown } | null;
 }
 
-/** Flow's API if Flow is enabled, whatever its version, or null. */
-export function findFlowApi(app: App): FlowApi | null {
+export type FlowLookup =
+  | { status: "missing" } // Flow isn't enabled
+  | { status: "no-api" } // Flow is enabled but predates the Focus API
+  | { status: "found"; api: FlowApi }; // Any API version; the caller checks it
+
+function hasApiVersion(api: unknown): api is FlowApi {
+  return (
+    typeof api === "object" &&
+    api !== null &&
+    typeof (api as { apiVersion?: unknown }).apiVersion === "number"
+  );
+}
+
+export function findFlow(app: App): FlowLookup {
   const plugins = (app as App & { plugins?: PluginRegistry }).plugins;
-  return plugins?.getPlugin("flow")?.api ?? null;
+  const flow = plugins?.getPlugin("flow");
+  if (!flow) return { status: "missing" };
+  return hasApiVersion(flow.api) ? { status: "found", api: flow.api } : { status: "no-api" };
+}
+
+/** Flow's API if Flow is enabled and has one, whatever its version, or null. */
+export function findFlowApi(app: App): FlowApi | null {
+  const lookup = findFlow(app);
+  return lookup.status === "found" ? lookup.api : null;
 }
