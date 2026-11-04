@@ -8,7 +8,10 @@
           "url": "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
           "title": "Write the onboarding guide",
           "trashed": null,
-          "state": { "type": "completed" }
+          "state": {
+            "type": "completed"
+          },
+          "project": null
         },
         {
           "id": "0b5c3e0a-1111-4c55-9a1e-000000000003",
@@ -16,10 +19,15 @@
           "url": "https://linear.app/testco/issue/TST-3/old-ticket",
           "title": "Old ticket",
           "trashed": true,
-          "state": { "type": "canceled" }
+          "state": {
+            "type": "canceled"
+          }
         }
       ],
-      "pageInfo": { "hasNextPage": false, "endCursor": null }
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
     }
   }
 }

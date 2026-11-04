@@ -27,6 +27,7 @@ export function ticket(
     title: `Title of ${identifier}`,
     stateType: "started",
     trashed: false,
+    projectName: null,
     ...rest,
   };
 }

@@ -14,9 +14,9 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const QUERIES = {
   organization: "query { viewer { organization { name urlKey } } }",
   issue:
-    "query ($id: String!) { issue(id: $id) { id identifier url title trashed state { type } } }",
+    "query ($id: String!) { issue(id: $id) { id identifier url title trashed state { type } project { name } } }",
   issues:
-    "query ($filter: IssueFilter, $after: String) { issues(filter: $filter, first: 50, after: $after, includeArchived: true) { nodes { id identifier url title trashed state { type } } pageInfo { hasNextPage endCursor } } }",
+    "query ($filter: IssueFilter, $after: String) { issues(filter: $filter, first: 50, after: $after, includeArchived: true) { nodes { id identifier url title trashed state { type } project { name } } pageInfo { hasNextPage endCursor } } }",
 };
 
 const ROLES = ["exists", "missing", "trashed", "moved", "hidden"];
@@ -61,6 +61,7 @@ function describeTicket(node) {
     url: node.url,
     trashed: node.trashed,
     stateType: node.state?.type,
+    projectName: node.project?.name ?? null,
   };
 }
 

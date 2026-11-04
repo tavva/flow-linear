@@ -93,6 +93,7 @@ describe("getTicketByIdentifier", () => {
       title: "Fix the login page",
       stateType: "unstarted",
       trashed: false,
+      projectName: "Login revamp",
     });
     expect(sentBody(0).query).toContain("issue(id: $id)");
     expect(sentBody(0).variables).toEqual({ id: "OLD-2" });
@@ -128,6 +129,10 @@ describe("getTickets", () => {
     expect([...tickets.keys()]).toEqual(["TST-1", "TST-3", "TST-9"]);
     expect(tickets.get("TST-1")?.stateType).toBe("completed");
     expect(tickets.get("TST-3")?.trashed).toBe(true);
+    // A ticket with no project, and one whose response leaves the field out
+    expect(tickets.get("TST-1")?.projectName).toBeNull();
+    expect(tickets.get("TST-3")?.projectName).toBeNull();
+    expect(sentBody(0).query).toContain("project { name }");
     // Missing from the batch, then not found on its own either
     expect(sentBody(1).variables).toEqual({ id: "TST-9" });
     expect(tickets.get("TST-9")).toBeNull();

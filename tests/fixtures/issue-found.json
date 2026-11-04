@@ -8,6 +8,9 @@
       "trashed": false,
       "state": {
         "type": "unstarted"
+      },
+      "project": {
+        "name": "Login revamp"
       }
     }
   }

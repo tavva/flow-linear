@@ -16,6 +16,7 @@ export interface LinearTicket {
   title: string;
   stateType: string; // "triage", "backlog", "unstarted", "started", "completed" or "canceled"
   trashed: boolean;
+  projectName: string | null; // The Linear project the ticket belongs to, if any
 }
 
 export interface LinearOrganization {
@@ -44,7 +45,7 @@ export interface LinearWorkspaceClient {
   getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>>;
 }
 
-const TICKET_FIELDS = `id identifier url title trashed state { type }`;
+const TICKET_FIELDS = `id identifier url title trashed state { type } project { name }`;
 
 /** Every query the plugin sends. scripts/probe-linear.mjs sends the same ones. */
 export const QUERIES = {
@@ -60,6 +61,7 @@ interface TicketNode {
   title: string;
   trashed?: boolean | null;
   state?: { type: string } | null;
+  project?: { name: string } | null;
 }
 
 interface IssuePage {
@@ -82,6 +84,7 @@ function toTicket(node: TicketNode): LinearTicket {
     title: node.title,
     stateType: node.state?.type ?? "",
     trashed: node.trashed === true,
+    projectName: node.project?.name ?? null,
   };
 }
 
