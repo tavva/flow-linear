@@ -211,6 +211,15 @@ describe("WorkspaceModal", () => {
     return { modal, saved, linear };
   }
 
+  it("explains what the API key is and what the secret's ID is for", () => {
+    open();
+    const key = row("Linear API key");
+    expect(key.desc).toContain("starting lin_api_");
+    expect(key.desc).toContain("Read access is enough");
+    expect(key.desc).toContain("the ID is just a name for it");
+    expect(key.desc).toContain("only the name goes into Flow Linear's synced settings");
+  });
+
   it("checks the key and saves the workspace with Linear's urlKey", async () => {
     const { modal, saved } = open();
     SecretComponent.created[0].choose("linear-testco");

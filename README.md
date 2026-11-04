@@ -38,8 +38,13 @@ else there.
    limit the key to the teams whose tickets you'll add. (Your workspace's admins
    may need to allow members to create API keys.)
 2. In Obsidian, open **Settings → Flow Linear** and click **Add workspace**.
-3. Choose or create a secret for the API key. Flow Linear checks the key with Linear
-   and fills in the workspace for you.
+3. Under **Linear API key**, pick a key you've saved by its name, or create one.
+   When creating one, the **ID** is just a name for the key, such as
+   `linear-acme`, and the **value** is the key itself, which starts with
+   `lin_api_` (ignore the example value Obsidian shows). Obsidian keeps the key in
+   its secret storage on this device; only the name goes into Flow Linear's synced
+   settings. Flow Linear checks the key with Linear and fills in the workspace for
+   you.
 4. Optionally give the workspace a display name (shown on its Focus items) and pick
    the sphere new items go into.
 

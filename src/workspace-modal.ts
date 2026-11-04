@@ -32,8 +32,10 @@ export class WorkspaceModal extends Modal {
     };
 
     new Setting(contentEl)
-      .setName("API key")
-      .setDesc("A Linear personal API key, kept in Obsidian's secret storage on this device.")
+      .setName("Linear API key")
+      .setDesc(
+        "A personal API key from Linear's Settings → Security & access, starting lin_api_. Read access is enough. Pick a key you've saved by its name, or create one: the ID is just a name for it, such as linear-acme, and the value is the lin_api_ key itself (ignore Obsidian's example value). Obsidian keeps the key in its secret storage on this device; only the name goes into Flow Linear's synced settings."
+      )
       .addComponent((el) =>
         new SecretComponent(this.app, el).onChange((value) => {
           input.apiKeySecretName = value;
