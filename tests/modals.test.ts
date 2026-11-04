@@ -61,8 +61,70 @@ describe("AddTicketModal", () => {
     });
     const modal = new AddTicketModal({} as never, addTicket, () => focus.getSpheres());
     modal.open();
-    return { modal, focus };
+    return { modal, focus, linear };
   }
+
+  /** Hold the ticket lookup until `release` is called. */
+  function holdLookups(linear: LinearWorkspace) {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lookUp = linear.getTicketByIdentifier.bind(linear);
+    const calls = jest.fn();
+    linear.getTicketByIdentifier = async (identifier) => {
+      calls();
+      await gate;
+      return lookUp(identifier);
+    };
+    return { release, calls };
+  }
+
+  it("looks the ticket up once however often Find is pressed", async () => {
+    const { linear } = open();
+    const held = holdLookups(linear);
+    const link = row("Ticket link").texts[0];
+    link.type("https://linear.app/testco/issue/TST-4");
+
+    void button("Find ticket").click();
+    link.inputEl.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    void button("Find ticket").click();
+    await flush();
+    held.release();
+    await flush();
+
+    expect(held.calls).toHaveBeenCalledTimes(1);
+    expect(row("Wording").texts[0].value).toBe("Ship the release");
+  });
+
+  it("adds the ticket once however often Add is pressed", async () => {
+    const { focus } = open();
+    row("Ticket link").texts[0].type("https://linear.app/testco/issue/TST-4");
+    await click("Find ticket");
+
+    const add = button("Add");
+    void add.click();
+    void add.click();
+    row("Wording").texts[0].inputEl.dispatch("keydown", { key: "Enter", preventDefault() {} });
+    await flush();
+
+    expect(focus.items).toHaveLength(1);
+  });
+
+  it("draws nothing once closed while a lookup is still running", async () => {
+    const { modal, linear } = open();
+    const held = holdLookups(linear);
+    row("Ticket link").texts[0].type("https://linear.app/testco/issue/TST-4");
+    void button("Find ticket").click();
+    await flush();
+
+    modal.close();
+    held.release();
+    await flush();
+
+    expect(Setting.created.some((setting) => setting.name === "Wording")).toBe(false);
+    expect((modal.contentEl as unknown as FakeElement).children).toEqual([]);
+  });
 
   it("finds the ticket, offers its title and the workspace's sphere, and adds it", async () => {
     const { modal, focus } = open();

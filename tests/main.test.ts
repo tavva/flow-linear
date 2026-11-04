@@ -2,7 +2,11 @@
 // ABOUTME: the startup delay and check interval, the add-ticket command and clean-up on unload.
 
 import { Events, Modal, Notice } from "obsidian";
-import FlowLinearPlugin, { FLOW_WITHOUT_API_NOTICE, STARTUP_CHECK_DELAY_MS } from "../src/main";
+import FlowLinearPlugin, {
+  FLOW_WITHOUT_API_NOTICE,
+  STARTUP_CHECK_DELAY_MS,
+  TICK_MS,
+} from "../src/main";
 import { AddTicketModal } from "../src/add-ticket-modal";
 import { FlowApi } from "../src/flow-api";
 import { FocusStore } from "./helpers/focus-store";
@@ -139,18 +143,23 @@ describe("finding Flow", () => {
 });
 
 describe("check interval", () => {
-  it("checks every interval and restarts when the interval changes", async () => {
+  it("checks once the interval has passed, and follows a changed interval at once", async () => {
     const { plugin, workspace } = setUp();
     const requestCheck = await load(plugin, workspace);
     requestCheck.mockClear();
 
-    jest.advanceTimersByTime(5 * 60_000);
+    // The tick runs each minute, so a check comes within a minute of the interval passing
+    jest.advanceTimersByTime(4 * 60_000);
+    expect(requestCheck).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(60_000 + TICK_MS);
     expect(requestCheck).toHaveBeenCalledTimes(1);
 
+    // No new timer is needed for a new interval
+    const intervals = jest.getTimerCount();
     plugin.settings.checkIntervalMinutes = 1;
-    plugin.restartCheckInterval();
-    jest.advanceTimersByTime(5 * 60_000);
-    expect(requestCheck).toHaveBeenCalledTimes(6);
+    jest.advanceTimersByTime(3 * TICK_MS);
+    expect(requestCheck).toHaveBeenCalledTimes(4);
+    expect(jest.getTimerCount()).toBe(intervals);
   });
 
   it("doesn't check without Flow", async () => {
@@ -230,7 +239,10 @@ describe("settings and secrets", () => {
     expect(plugin.settings).toBe(settings);
     expect(settings.checkIntervalMinutes).toBe(2);
     expect(requestCheck).toHaveBeenCalledTimes(1);
-    jest.advanceTimersByTime(2 * 60_000);
+    // An open settings tab is redrawn with the new settings
+    const tab = (plugin as unknown as { settingTabs: { updates: number }[] }).settingTabs[0];
+    expect(tab.updates).toBe(1);
+    jest.advanceTimersByTime(2 * 60_000 + TICK_MS);
     expect(requestCheck).toHaveBeenCalledTimes(2);
   });
 

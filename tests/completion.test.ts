@@ -1,10 +1,10 @@
-// ABOUTME: Tests completing Focus items whose Linear tickets are done, cancelled or deleted.
+// ABOUTME: Tests completing Focus items whose Linear tickets are done, cancelled or trashed.
 // ABOUTME: Runs the checker against an in-memory Focus list and Linear workspace.
 
 import {
   CompletionChecker,
-  findItemsToComplete,
   NO_KEY_STATUS,
+  planCompletionCheck,
   unfinishedItemsByIdentifier,
 } from "../src/completion";
 import { FlowApi } from "../src/flow-api";
@@ -43,6 +43,11 @@ class Device {
     return this.linear.get("linear-testco") as LinearWorkspace;
   }
 
+  /** How many times the tickets were looked up in Linear. */
+  lookups(client = this.testco): number {
+    return client.calls.filter((call) => call === "getTickets").length;
+  }
+
   check(): Promise<void> {
     return this.checker.requestCheck();
   }
@@ -50,6 +55,13 @@ class Device {
 
 function quietConsole(method: "error" | "warn" = "error") {
   return jest.spyOn(console, method).mockImplementation(() => {});
+}
+
+function otherWorkspace(d: Device): LinearWorkspace {
+  const other = new LinearWorkspace("otherco", "Otherco");
+  d.linear.set("linear-otherco", other);
+  d.secrets.set("linear-otherco", "linear-otherco");
+  return other;
 }
 
 describe("unfinishedItemsByIdentifier", () => {
@@ -67,36 +79,57 @@ describe("unfinishedItemsByIdentifier", () => {
   });
 });
 
-describe("findItemsToComplete", () => {
+describe("planCompletionCheck", () => {
   const item = focusItem("TST-1");
   const items = new Map([["TST-1", [item]]]);
+  const plan = (found: ReturnType<typeof ticket> | null) =>
+    planCompletionCheck(items, new Map([["TST-1", found]]));
 
   it.each(["completed", "canceled"])("completes the items of a %s ticket", (stateType) => {
-    expect(
-      findItemsToComplete(items, new Map([["TST-1", ticket("TST-1", { stateType })]]))
-    ).toEqual([{ itemId: item.id, identifier: "TST-1", reason: "closed" }]);
+    expect(plan(ticket("TST-1", { stateType }))).toEqual({
+      complete: [{ itemId: item.id, identifier: "TST-1", reason: "closed" }],
+      relink: [],
+      notVisible: [],
+    });
   });
 
   it.each(["triage", "backlog", "unstarted", "started"])(
     "leaves a %s ticket's items",
     (stateType) => {
-      expect(
-        findItemsToComplete(items, new Map([["TST-1", ticket("TST-1", { stateType })]]))
-      ).toEqual([]);
+      expect(plan(ticket("TST-1", { stateType }))).toEqual({
+        complete: [],
+        relink: [],
+        notVisible: [],
+      });
     }
   );
 
-  it("completes the items of a deleted or trashed ticket", () => {
-    expect(findItemsToComplete(items, new Map([["TST-1", null]]))).toEqual([
+  it("completes the items of a trashed ticket", () => {
+    expect(plan(ticket("TST-1", { trashed: true })).complete).toEqual([
       { itemId: item.id, identifier: "TST-1", reason: "deleted" },
     ]);
-    expect(
-      findItemsToComplete(items, new Map([["TST-1", ticket("TST-1", { trashed: true })]]))
-    ).toEqual([{ itemId: item.id, identifier: "TST-1", reason: "deleted" }]);
+  });
+
+  it("never completes the items of a ticket Linear didn't return", () => {
+    // The key may not see it: wrong key, a key limited to other teams, or a private team
+    expect(plan(null)).toEqual({ complete: [], relink: [], notVisible: ["TST-1"] });
+  });
+
+  it("relinks the items of an open ticket that now has another identifier", () => {
+    const moved = ticket("NEW-7", { url: "https://linear.app/testco/issue/NEW-7/some-title" });
+    expect(plan(moved)).toEqual({
+      complete: [],
+      relink: [{ itemId: item.id, url: "https://linear.app/testco/issue/NEW-7/some-title" }],
+      notVisible: [],
+    });
   });
 
   it("leaves items whose ticket wasn't looked up", () => {
-    expect(findItemsToComplete(items, new Map())).toEqual([]);
+    expect(planCompletionCheck(items, new Map())).toEqual({
+      complete: [],
+      relink: [],
+      notVisible: [],
+    });
   });
 });
 
@@ -109,22 +142,102 @@ describe("CompletionChecker", () => {
     await d.check();
 
     expect(d.focus.items.map((i) => i.completedAt !== undefined)).toEqual([true, true, false]);
-    expect(d.testco.calls).toEqual(["getTickets"]);
+    expect(d.testco.calls).toEqual(["getOrganization", "getTickets"]);
     expect(d.checker.getStatus("testco")).toEqual({ lastSuccessAt: d.clock });
   });
 
-  it("completes the items of a deleted ticket and logs it", async () => {
+  it("completes the items of a trashed ticket and logs it once done", async () => {
     const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { trashed: true })];
     d.focus.items = [focusItem("TST-1")];
     const warn = quietConsole("warn");
+    const complete = d.focus.completeFocusItem.bind(d.focus);
+    d.focus.completeFocusItem = async (id) => {
+      expect(warn).not.toHaveBeenCalled();
+      return complete(id);
+    };
 
     await d.check();
 
     expect(d.focus.items[0].completedAt).toBeDefined();
     expect(warn).toHaveBeenCalledWith(
-      "Flow Linear: TST-1 is no longer in Testco, so its Focus item was completed"
+      "Flow Linear: TST-1 was deleted in Testco, so its Focus item was completed"
     );
     warn.mockRestore();
+  });
+
+  it("doesn't log a deletion when the completion fails", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { trashed: true })];
+    d.focus.items = [focusItem("TST-1")];
+    d.focus.completeFocusItem = async () => {
+      throw new Error("Focus file is locked");
+    };
+    const warn = quietConsole("warn");
+    const consoleError = quietConsole();
+
+    await d.check();
+
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+    consoleError.mockRestore();
+  });
+
+  it("leaves a ticket the key can't see, and says so in the status and once as a notice", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-2")];
+    d.focus.items = [focusItem("ABC-12"), focusItem("ABC-40"), focusItem("TST-2")];
+
+    await d.check();
+    await d.check();
+
+    expect(d.focus.items.every((i) => i.completedAt === undefined)).toBe(true);
+    expect(d.checker.getStatus("testco")).toEqual({
+      lastSuccessAt: d.clock,
+      notVisible: ["ABC-12", "ABC-40"],
+    });
+    expect(d.notices).toEqual([
+      "Flow Linear, Testco: 2 tickets not visible with this key: ABC-12, ABC-40",
+    ]);
+  });
+
+  it("skips the workspace when its key belongs to another Linear workspace", async () => {
+    const d = new Device();
+    // Another device's secret of the same name holds a key for "otherco"
+    d.linear.set("linear-testco", new LinearWorkspace("otherco", "Otherco"));
+    d.focus.items = [focusItem("TST-1")];
+
+    await d.check();
+
+    expect(d.testco.calls).toEqual(["getOrganization"]);
+    expect(d.focus.items[0].completedAt).toBeUndefined();
+    const message =
+      'The API key for Testco belongs to the Linear workspace "otherco", not "testco". Check the key in Flow Linear\'s settings.';
+    expect(d.checker.getStatus("testco").error).toBe(message);
+    expect(d.notices).toEqual([message]);
+  });
+
+  it("relinks the items of a ticket that moved team, then looks it up by its new identifier", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("NEW-7", { id: "uuid-moved" })];
+    d.testco.oldIdentifiers.set("TST-1", "uuid-moved");
+    const item = focusItem("TST-1");
+    d.focus.items = [item];
+
+    await d.check();
+
+    expect(d.focus.writes).toEqual([`update ${item.id}`]);
+    expect(d.focus.items[0].external.url).toBe("https://linear.app/testco/issue/NEW-7/some-title");
+    expect(d.focus.items[0].completedAt).toBeUndefined();
+
+    // A different ticket now has the old identifier; it mustn't be taken for this one
+    d.testco.oldIdentifiers.clear();
+    d.testco.tickets.push(ticket("TST-1", { id: "uuid-new", stateType: "completed" }));
+    const lookUp = jest.spyOn(d.testco, "getTickets");
+    await d.check();
+
+    expect(lookUp).toHaveBeenCalledWith(["NEW-7"]);
+    expect(d.focus.items[0].completedAt).toBeUndefined();
   });
 
   it("asks Linear nothing when there are no unfinished linked items", async () => {
@@ -187,10 +300,7 @@ describe("CompletionChecker", () => {
 
   it("keeps workspaces apart, even with the same identifier", async () => {
     const d = new Device([workspace("testco"), workspace("otherco")]);
-    const other = new LinearWorkspace("otherco", "Otherco");
-    other.tickets = [ticket("ABC-1", { urlKey: "otherco", stateType: "completed" })];
-    d.linear.set("linear-otherco", other);
-    d.secrets.set("linear-otherco", "linear-otherco");
+    otherWorkspace(d).tickets = [ticket("ABC-1", { urlKey: "otherco", stateType: "completed" })];
     d.testco.tickets = [ticket("ABC-1")];
     d.focus.items = [focusItem("ABC-1"), focusItem("ABC-1", { urlKey: "otherco" })];
 
@@ -219,7 +329,7 @@ describe("failures", () => {
 
     await d.check();
     await d.check();
-    expect(d.testco.calls).toEqual(["getTickets"]);
+    expect(d.lookups()).toBe(1);
     expect(d.notices).toEqual([
       "Linear refused the API key for Testco. Check it in Flow Linear's settings.",
     ]);
@@ -238,7 +348,7 @@ describe("failures", () => {
     await d.check();
     d.clock += 60_000;
     await d.check();
-    expect(d.testco.calls).toEqual(["getTickets"]);
+    expect(d.lookups()).toBe(1);
     expect(d.notices).toEqual([]);
 
     d.clock += 5 * 60_000;
@@ -248,10 +358,7 @@ describe("failures", () => {
 
   it("notifies once per workspace and kind of problem, and carries on with other workspaces", async () => {
     const d = new Device([workspace("testco"), workspace("otherco")]);
-    const other = new LinearWorkspace("otherco", "Otherco");
-    other.tickets = [ticket("OTH-1", { urlKey: "otherco", stateType: "completed" })];
-    d.linear.set("linear-otherco", other);
-    d.secrets.set("linear-otherco", "linear-otherco");
+    otherWorkspace(d).tickets = [ticket("OTH-1", { urlKey: "otherco", stateType: "completed" })];
     d.focus.items = [focusItem("TST-1"), focusItem("OTH-1", { urlKey: "otherco" })];
     d.testco.tickets = [ticket("TST-1")];
 
@@ -274,20 +381,25 @@ describe("failures", () => {
     expect(d.testco.calls).toEqual([]);
   });
 
-  it("stays quiet when Flow unloads mid-check", async () => {
+  it("stays quiet when Flow unloads mid-check, and writes nothing more", async () => {
     const d = new Device();
-    d.focus.items = [focusItem("TST-1")];
-    d.testco.tickets = [ticket("TST-1", { stateType: "completed" })];
-    const getTickets = d.testco.getTickets.bind(d.testco);
-    d.testco.getTickets = async (identifiers) => {
+    d.focus.items = [focusItem("TST-1"), focusItem("TST-2")];
+    d.testco.tickets = [
+      ticket("TST-1", { stateType: "completed" }),
+      ticket("TST-2", { stateType: "completed" }),
+    ];
+    const complete = d.focus.completeFocusItem.bind(d.focus);
+    d.focus.completeFocusItem = async (id) => {
+      await complete(id);
+      // Flow unloads after the first completion
       d.focus.unload();
       d.flow = null;
-      return getTickets(identifiers);
     };
     const consoleError = quietConsole();
 
     await d.check();
 
+    expect(d.focus.items.map((i) => i.completedAt !== undefined)).toEqual([true, false]);
     expect(d.notices).toEqual([]);
     expect(d.checker.getStatus("testco").error).toBeUndefined();
     expect(consoleError).not.toHaveBeenCalled();
@@ -298,9 +410,7 @@ describe("failures", () => {
 describe("stopping", () => {
   it("starts no more checks and stops a running one between steps", async () => {
     const d = new Device([workspace("testco"), workspace("otherco")]);
-    const other = new LinearWorkspace("otherco", "Otherco");
-    d.linear.set("linear-otherco", other);
-    d.secrets.set("linear-otherco", "linear-otherco");
+    const other = otherWorkspace(d);
     d.focus.items = [focusItem("TST-1"), focusItem("OTH-1", { urlKey: "otherco" })];
     d.testco.tickets = [ticket("TST-1", { stateType: "completed" })];
     const getTickets = d.testco.getTickets.bind(d.testco);
@@ -328,7 +438,7 @@ describe("one check at a time", () => {
     const third = d.check();
     await Promise.all([first, second, third]);
 
-    expect(d.testco.calls).toEqual(["getTickets", "getTickets"]);
+    expect(d.lookups()).toBe(2);
     expect(second).toBe(first);
   });
 
@@ -349,6 +459,6 @@ describe("one check at a time", () => {
     await d.check();
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(d.testco.calls).toEqual(["getTickets", "getTickets"]);
+    expect(d.lookups()).toBe(2);
   });
 });

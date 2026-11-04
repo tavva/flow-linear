@@ -6,6 +6,9 @@ import { AddTicket, FoundTicket } from "./add-ticket";
 
 export class AddTicketModal extends Modal {
   private errorEl: HTMLElement | null = null;
+  // Set while a lookup or add is waiting on Linear or Flow, so a second Enter or click is ignored
+  private busy = false;
+  private closed = false;
 
   constructor(
     app: App,
@@ -16,23 +19,38 @@ export class AddTicketModal extends Modal {
   }
 
   onOpen(): void {
+    this.closed = false;
     this.setTitle("Add Linear ticket to Focus");
     this.showUrlStep();
   }
 
   onClose(): void {
+    this.closed = true;
     this.contentEl.empty();
+  }
+
+  /** Run one step at a time; a step asked for while another runs is dropped. */
+  private async exclusively(step: () => Promise<void>): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      await step();
+    } finally {
+      this.busy = false;
+    }
   }
 
   private showUrlStep(): void {
     this.contentEl.empty();
     let url = "";
-    const lookUp = async () => {
-      this.showError("");
-      const result = await this.addTicket.lookUp(url);
-      if (result.ok) this.showDetailsStep(result.found);
-      else this.showError(result.error);
-    };
+    const lookUp = () =>
+      this.exclusively(async () => {
+        this.showError("");
+        const result = await this.addTicket.lookUp(url);
+        if (this.closed) return;
+        if (result.ok) this.showDetailsStep(result.found);
+        else this.showError(result.error);
+      });
 
     new Setting(this.contentEl).setName("Ticket link").addText((text) => {
       text.setPlaceholder("https://linear.app/team/issue/ABC-123").onChange((value) => {
@@ -63,12 +81,14 @@ export class AddTicketModal extends Modal {
       ? found.workspace.defaultSphere
       : (spheres[0] ?? found.workspace.defaultSphere);
 
-    const add = async () => {
-      this.showError("");
-      const error = await this.addTicket.add(found, wording, sphere);
-      if (error) this.showError(error);
-      else this.close();
-    };
+    const add = () =>
+      this.exclusively(async () => {
+        this.showError("");
+        const error = await this.addTicket.add(found, wording, sphere);
+        if (this.closed) return;
+        if (error) this.showError(error);
+        else this.close();
+      });
 
     this.contentEl.createEl("p", {
       cls: "flow-linear-ticket",

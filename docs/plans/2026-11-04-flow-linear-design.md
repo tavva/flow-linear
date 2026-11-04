@@ -88,18 +88,23 @@ hotkey).
    without query string or fragment.
 2. `urlKey` picks the workspace. If none matches, the modal says which
    workspaces are set up and adds nothing.
-3. The plugin fetches the ticket with `issue(id: "<IDENTIFIER>")`. Linear
-   accepts the identifier there, including one the ticket had before it moved
-   team. A "not found" answer means there's no such ticket.
-4. The modal shows the title in an editable wording field and the sphere
+3. The plugin checks the key with `viewer { organization { urlKey } }`. If it
+   belongs to a different workspace, the modal says so and adds nothing.
+4. It fetches the ticket with `issue(id: "<IDENTIFIER>")`. Linear accepts the
+   identifier there, including one the ticket had before it moved team. "Not
+   found" may mean there's no such ticket or that the key can't see it; the
+   modal says both.
+5. If the ticket's state type is `completed` or `canceled`, or the link
+   Linear returns names another workspace, the modal says so and adds nothing.
+6. The modal shows the title in an editable wording field and the sphere
    (default from the workspace) in a dropdown. Add saves; Escape cancels.
-5. If the ticket's state type is `completed` or `canceled`, the modal says so
-   and adds nothing.
-6. On Add: `api.addFocusItem({ text, sphere, sourceName: "linear",
+7. On Add: `api.addFocusItem({ text, sphere, sourceName: "linear",
 sourceLabel: displayName, url: canonicalUrl, externalId: identifier })`.
 
 Pasting a ticket that already has linked items adds another step for it. It
-doesn't replace the existing ones.
+doesn't replace the existing ones. While a lookup or an add is waiting, a
+second Enter or click is ignored, and nothing is drawn into a modal that has
+been closed.
 
 ## Completing items
 
@@ -108,8 +113,12 @@ doesn't replace the existing ones.
 - 30 seconds after Flow's API becomes available (see "Finding Flow"), to give
   the vault's sync time to bring in other devices' changes. Nothing runs
   before then.
-- Every `checkIntervalMinutes`, via `registerInterval(window.setInterval(…))`.
-- After a workspace is added, and after settings reload from disk.
+- Once `checkIntervalMinutes` have passed since the last check. One timer,
+  registered once with `registerInterval(window.setInterval(…))`, ticks every
+  minute and checks when the interval is up, so a check comes within a minute
+  of it and changing the interval needs no new timer.
+- After a workspace is added, and after settings reload from disk (which also
+  redraws an open settings tab).
 
 Only one check runs at a time. A request made during a check, including one
 made as the check finishes, queues a single follow-up.
@@ -121,17 +130,33 @@ Per workspace with a key on this device:
 1. Read the Focus items with `getFocusItems("linear")` and keep the
    unfinished ones whose URL names this workspace, grouped by identifier.
 2. If there are none, ask Linear nothing.
-3. Fetch the tickets' states, 50 at a time, with `issues(filter: { or: [{
+3. Check the key with `viewer { organization { urlKey } }`. `data.json` names
+   only the secret, so another device's secret of that name may hold a key
+   for a different workspace. If the `urlKey` doesn't match, set a status
+   error, show one notice, and skip the workspace.
+4. Fetch the tickets' states, 50 at a time, with `issues(filter: { or: [{
    team: { key }, number }] }, includeArchived: true)`. An identifier that
    doesn't come back that way (the ticket may have moved team) is looked up
    on its own with `issue(id:)`.
-4. For each ticket whose state type is `completed` or `canceled`, or which is
-   trashed or not found, call `completeFocusItem` on each of its unfinished
-   items. A deleted ticket is logged with `console.warn`.
+5. For each ticket whose state type is `completed` or `canceled`, or which is
+   trashed, call `completeFocusItem` on each of its unfinished items. A
+   trashed ticket is logged with `console.warn` once its item is completed.
+   Linear keeps deleted tickets in the trash, with `trashed: true`, for about
+   30 days, so a check in that time catches them.
+6. A ticket Linear doesn't return is never completed: "not found" may only
+   mean the key can't see it (a wrong key, a key limited to other teams, or a
+   private team the user has left). Those identifiers go in the status row
+   ("2 tickets not visible with this key: ABC-12, ABC-40") and in one notice
+   per session.
+7. An open ticket whose identifier has changed (it moved, or its team key was
+   renamed) gets its items relinked with `updateFocusItem(id, { url })`, so
+   later checks look it up by its current identifier, and a team key reused
+   later can't match a different ticket. Flow's API can't change
+   `externalId`, so the chip keeps the old identifier until Flow allows it.
 
-A pure function, `findItemsToComplete(itemsByIdentifier, tickets)`, decides
-which items to complete; the `CompletionChecker` does the reading and
-writing.
+A pure function, `planCompletionCheck(itemsByIdentifier, tickets)`, decides
+what to complete and relink and what isn't visible; the `CompletionChecker`
+does the reading and writing, and stops between items if Flow unloads.
 
 Completing is idempotent (`completeFocusItem` keeps the first completion
 time), so the check needs no stored state, no confirmation and no
@@ -141,11 +166,6 @@ back as change events; the plugin doesn't listen to them.
 An item whose completion fails because it has already gone or been completed
 counts as done. Other failures are reported after the remaining items have
 been tried.
-
-A ticket the key can't see (for example in a team the key isn't limited to)
-also comes back as not found, so its items would be completed. Items are only
-added through the command with the same key, so this only happens if the
-key's access changes.
 
 ## Finding Flow
 
@@ -181,6 +201,10 @@ As set out in the Focus API design:
 - **Missing secret.** A workspace whose secret name has no value on this
   device (secrets are stored per device) is skipped without a notice. Its
   status row says "No API key on this device".
+- **Key for the wrong workspace.** Checks skip the workspace with a status
+  error and one notice; the add modal refuses with the same message.
+- **Tickets the key can't see.** Left alone, listed in the status row, one
+  notice per session.
 - **Unparseable URL or unknown workspace** in the add modal: an inline error,
   nothing added.
 - **Several devices or vaults.** Each device with a key checks on its own.
@@ -301,10 +325,11 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
 
 ## Testing
 
-- **`findItemsToComplete`**: completed and cancelled tickets complete their
-  items; open states don't; deleted and trashed tickets count as done; items
-  whose ticket wasn't looked up are left. Grouping keeps only the workspace's
-  unfinished linked items.
+- **`planCompletionCheck`**: completed, cancelled and trashed tickets complete
+  their items; open states don't; a ticket Linear didn't return is listed as
+  not visible and never completed; an open ticket with a new identifier is
+  relinked; items whose ticket wasn't looked up are left. Grouping keeps only
+  the workspace's unfinished linked items.
 - **URL parsing**: valid forms (with and without slug, query, fragment) and
   rejects (other hosts, project or team URLs, missing identifier).
 - **Linear client**: GraphQL responses stored as JSON in `tests/fixtures/`,
@@ -315,13 +340,17 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
   the mock.
 - **Completion checker**: runs against an in-memory Focus store that
   implements `FlowApi` and an in-memory Linear workspace. Covers completing
-  and leaving items, deleted tickets, repeat checks doing nothing, items that
-  have already gone, failed writes, workspaces with the same identifier, each
-  failure kind and its notice, Flow unloading mid-check, stopping, and one
-  check at a time with a single queued follow-up.
+  and leaving items, trashed tickets (logged only after completing), tickets
+  the key can't see, a key for another workspace, relinking a moved ticket
+  and not matching a reused identifier afterwards, repeat checks doing
+  nothing, items that have already gone, failed writes, workspaces with the
+  same identifier, each failure kind and its notice, Flow unloading
+  mid-check, stopping, and one check at a time with a single queued
+  follow-up.
 - **Settings and modals**: the add modal's handling of an unknown workspace,
-  a closed ticket and empty wording; the workspace form; the old Flow
-  warning.
+  a key for another workspace, a link outside the workspace, a closed ticket
+  and empty wording; Find and Add pressed twice; a modal closed mid-lookup;
+  the workspace form; the old Flow warning.
 - **Manual check in Obsidian** before the first release: in a Linear test
   team, add tickets by link, complete and cancel them in Linear, delete one,
   go offline and come back.

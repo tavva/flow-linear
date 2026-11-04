@@ -4,6 +4,7 @@
 import { FlowApi, SOURCE_NAME } from "./flow-api";
 import { LinearTicket, LinearWorkspaceClient } from "./linear-client";
 import { FlowLinearSettings, WorkspaceSettings } from "./settings";
+import { wrongWorkspaceMessage } from "./completion";
 import { parseTicketUrl } from "./ticket-url";
 
 export interface AddTicketDeps {
@@ -55,13 +56,28 @@ export class AddTicket {
 
     let ticket: LinearTicket | null;
     try {
-      ticket = await this.deps.createClient(apiKey).getTicketByIdentifier(ref.identifier);
+      const client = this.deps.createClient(apiKey);
+      const organization = await client.getOrganization();
+      if (organization.urlKey !== workspace.urlKey) {
+        return { ok: false, error: wrongWorkspaceMessage(workspace, organization.urlKey) };
+      }
+      ticket = await client.getTicketByIdentifier(ref.identifier);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, error: `Couldn't fetch the ticket from Linear: ${message}` };
     }
     if (!ticket || ticket.trashed) {
-      return { ok: false, error: `${ref.identifier} wasn't found in ${workspace.displayName}.` };
+      return {
+        ok: false,
+        error: `${ref.identifier} wasn't found in ${workspace.displayName}, or this key can't see it.`,
+      };
+    }
+    // The checks read the workspace from the link, so it must be this workspace's
+    if (parseTicketUrl(ticket.url)?.urlKey !== workspace.urlKey) {
+      return {
+        ok: false,
+        error: `Linear gave a link for ${ticket.identifier} outside ${workspace.displayName}: ${ticket.url}`,
+      };
     }
     if (CLOSED_STATE_TYPES.has(ticket.stateType)) {
       const state = ticket.stateType === "canceled" ? "cancelled" : "completed";

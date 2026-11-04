@@ -39,7 +39,7 @@ describe("readSettings", () => {
       ],
       checkIntervalMinutes: 0,
       oldFlowWarningDismissed: "yes",
-      labelName: "flow-focus",
+      someRemovedSetting: "value",
     });
     expect(settings).toEqual({
       workspaces: [{ urlKey: "a", displayName: "a", apiKeySecretName: "key-a", defaultSphere: "" }],

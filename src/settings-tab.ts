@@ -3,7 +3,7 @@
 
 import { App, PluginSettingTab, SettingDefinitionItem } from "obsidian";
 import type FlowLinearPlugin from "./main";
-import { WorkspaceStatus } from "./completion";
+import { notVisibleMessage, WorkspaceStatus } from "./completion";
 import { clampInterval, MIN_CHECK_INTERVAL_MINUTES } from "./settings";
 import { WorkspaceModal } from "./workspace-modal";
 
@@ -12,10 +12,11 @@ export const OLD_FLOW_WARNING =
 
 export function describeStatus(status: WorkspaceStatus): string {
   if (status.error) return `Last error: ${status.error}`;
-  if (status.lastSuccessAt) {
-    return `Last checked ${new Date(status.lastSuccessAt).toLocaleString()}`;
-  }
-  return "Not checked yet";
+  if (!status.lastSuccessAt) return "Not checked yet";
+  const checked = `Last checked ${new Date(status.lastSuccessAt).toLocaleString()}`;
+  return status.notVisible?.length
+    ? `${checked}. ${notVisibleMessage(status.notVisible)}`
+    : checked;
 }
 
 export class FlowLinearSettingTab extends PluginSettingTab {
@@ -93,8 +94,8 @@ export class FlowLinearSettingTab extends PluginSettingTab {
 
   async setControlValue(key: string, value: unknown): Promise<void> {
     if (key !== "checkIntervalMinutes" || typeof value !== "number") return;
+    // The plugin's timer reads the interval on each tick
     this.plugin.settings.checkIntervalMinutes = clampInterval(value);
-    this.plugin.restartCheckInterval();
     await this.plugin.saveSettings();
   }
 

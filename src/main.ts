@@ -21,6 +21,10 @@ import { FlowLinearSettingTab } from "./settings-tab";
 // before the first check
 export const STARTUP_CHECK_DELAY_MS = 30_000;
 
+// One timer, registered once, ticks this often and checks when the interval has passed, so
+// changing the interval needs no new timer
+export const TICK_MS = 60_000;
+
 export const FLOW_WITHOUT_API_NOTICE =
   "This version of Flow is too old for Flow Linear, so Flow Linear won't run. Update Flow on every device that syncs this vault.";
 
@@ -28,7 +32,8 @@ export default class FlowLinearPlugin extends Plugin {
   settings: FlowLinearSettings = readSettings(null);
   flowApi: FlowApi | null = null;
   checker!: CompletionChecker;
-  private checkInterval: number | null = null;
+  private settingTab: FlowLinearSettingTab | null = null;
+  private lastCheckRequestedAt = 0;
   private startupTimer: number | null = null;
   private checksAllowed = false;
   private warnedAboutVersion = false;
@@ -43,7 +48,8 @@ export default class FlowLinearPlugin extends Plugin {
       notify: (message) => new Notice(message),
     });
 
-    this.addSettingTab(new FlowLinearSettingTab(this.app, this));
+    this.settingTab = new FlowLinearSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     const addTicket = new AddTicket({
       getFlowApi: () => this.flowApi,
@@ -75,7 +81,7 @@ export default class FlowLinearPlugin extends Plugin {
     this.registerEvent(workspaceEvents.on(FLOW_API_UNLOADED_EVENT, () => this.disconnect()));
     this.app.workspace.onLayoutReady(() => this.connectToInstalledFlow());
 
-    this.restartCheckInterval();
+    this.registerInterval(window.setInterval(() => this.checkIfDue(), TICK_MS));
   }
 
   onunload(): void {
@@ -92,7 +98,7 @@ export default class FlowLinearPlugin extends Plugin {
   async onExternalSettingsChange(): Promise<void> {
     // Replace contents rather than the object, so the settings tab and a running check see them
     Object.assign(this.settings, readSettings(await this.loadData()));
-    this.restartCheckInterval();
+    this.settingTab?.update();
     this.requestCheck();
   }
 
@@ -106,16 +112,13 @@ export default class FlowLinearPlugin extends Plugin {
 
   requestCheck(): void {
     if (!this.flowApi || !this.checksAllowed) return;
+    this.lastCheckRequestedAt = Date.now();
     this.checker.requestCheck().catch((error) => console.error("Flow Linear check failed", error));
   }
 
-  restartCheckInterval(): void {
-    if (this.checkInterval !== null) window.clearInterval(this.checkInterval);
-    this.checkInterval = window.setInterval(
-      () => this.requestCheck(),
-      this.settings.checkIntervalMinutes * 60_000
-    );
-    this.registerInterval(this.checkInterval);
+  private checkIfDue(): void {
+    const intervalMs = this.settings.checkIntervalMinutes * 60_000;
+    if (Date.now() - this.lastCheckRequestedAt >= intervalMs) this.requestCheck();
   }
 
   /** Connect to Flow as it is now, warning if it's a version without the Focus API. */

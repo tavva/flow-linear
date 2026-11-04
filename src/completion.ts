@@ -1,4 +1,4 @@
-// ABOUTME: Completes Focus items whose Linear tickets are done, cancelled or deleted.
+// ABOUTME: Completes Focus items whose Linear tickets are done, cancelled or trashed.
 // ABOUTME: Checks one run at a time, queues a single follow-up, and keeps per-workspace status.
 
 import { ExternalFocusItem, FlowApi, SOURCE_NAME } from "./flow-api";
@@ -11,7 +11,20 @@ const CLOSED_STATE_TYPES = new Set(["completed", "canceled"]);
 export interface ItemToComplete {
   itemId: string;
   identifier: string;
-  reason: "closed" | "deleted";
+  reason: "closed" | "deleted"; // Deleted means trashed in Linear
+}
+
+export interface ItemToRelink {
+  itemId: string;
+  url: string; // The ticket's link under its current identifier
+}
+
+export interface CompletionPlan {
+  complete: ItemToComplete[];
+  // Items linking to an identifier the ticket no longer has (it moved or its team was renamed)
+  relink: ItemToRelink[];
+  // Identifiers Linear didn't return. The key may not see them, so their items are left alone.
+  notVisible: string[];
 }
 
 /** The workspace's unfinished linked items, by the identifier in each item's link. */
@@ -30,29 +43,40 @@ export function unfinishedItemsByIdentifier(
 }
 
 /**
- * Which items to complete, given each ticket's state from Linear (null when Linear says there's
- * no such ticket). Deleted and trashed tickets count as done.
+ * Decide what a check does, given each ticket from Linear (null when Linear returned nothing).
+ * Only a ticket Linear shows as completed, cancelled or trashed completes its items: "not
+ * found" may only mean this key can't see the ticket.
  */
-export function findItemsToComplete(
+export function planCompletionCheck(
   itemsByIdentifier: Map<string, ExternalFocusItem[]>,
   tickets: Map<string, LinearTicket | null>
-): ItemToComplete[] {
-  const toComplete: ItemToComplete[] = [];
+): CompletionPlan {
+  const plan: CompletionPlan = { complete: [], relink: [], notVisible: [] };
   for (const [identifier, items] of itemsByIdentifier) {
     if (!tickets.has(identifier)) continue;
     const ticket = tickets.get(identifier) ?? null;
-    let reason: ItemToComplete["reason"] | null = null;
-    if (!ticket || ticket.trashed) reason = "deleted";
-    else if (CLOSED_STATE_TYPES.has(ticket.stateType)) reason = "closed";
-    if (!reason) continue;
-    for (const item of items) toComplete.push({ itemId: item.id, identifier, reason });
+    if (!ticket) {
+      plan.notVisible.push(identifier);
+      continue;
+    }
+    const reason = ticket.trashed
+      ? "deleted"
+      : CLOSED_STATE_TYPES.has(ticket.stateType)
+        ? "closed"
+        : null;
+    if (reason) {
+      for (const item of items) plan.complete.push({ itemId: item.id, identifier, reason });
+    } else if (ticket.identifier !== identifier) {
+      for (const item of items) plan.relink.push({ itemId: item.id, url: ticket.url });
+    }
   }
-  return toComplete;
+  return plan;
 }
 
 export interface WorkspaceStatus {
   lastSuccessAt?: number;
   error?: string;
+  notVisible?: string[]; // Identifiers the key couldn't see on the last check
 }
 
 export interface CompletionCheckerDeps {
@@ -65,6 +89,18 @@ export interface CompletionCheckerDeps {
 }
 
 export const NO_KEY_STATUS = "No API key on this device";
+
+/** A key that belongs to a different Linear workspace from the one it's set up for. */
+export function wrongWorkspaceMessage(workspace: WorkspaceSettings, actualUrlKey: string): string {
+  return `The API key for ${workspace.displayName} belongs to the Linear workspace "${actualUrlKey}", not "${workspace.urlKey}". Check the key in Flow Linear's settings.`;
+}
+
+export function notVisibleMessage(identifiers: string[]): string {
+  const count = identifiers.length;
+  return `${count} ${count === 1 ? "ticket" : "tickets"} not visible with this key: ${identifiers.join(", ")}`;
+}
+
+class WrongWorkspaceError extends Error {}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -122,9 +158,13 @@ export class CompletionChecker {
     if (!api) return;
     // A copy, so removing a workspace mid-run doesn't skip another
     for (const workspace of [...this.deps.getSettings().workspaces]) {
-      if (this.stopped || this.deps.getFlowApi() !== api) return;
+      if (!this.stillConnected(api)) return;
       await this.checkWorkspace(api, workspace);
     }
+  }
+
+  private stillConnected(api: FlowApi): boolean {
+    return !this.stopped && this.deps.getFlowApi() === api;
   }
 
   private async checkWorkspace(api: FlowApi, workspace: WorkspaceSettings): Promise<void> {
@@ -139,44 +179,76 @@ export class CompletionChecker {
 
     try {
       const items = unfinishedItemsByIdentifier(await api.getFocusItems(SOURCE_NAME), workspace);
+      let notVisible: string[] = [];
       if (items.size > 0) {
-        const tickets = await this.deps.createClient(apiKey).getTickets([...items.keys()]);
-        await this.complete(api, workspace, findItemsToComplete(items, tickets));
+        const client = this.deps.createClient(apiKey);
+        // data.json names only the secret, so another device's secret of that name may hold a
+        // key for a different workspace
+        const organization = await client.getOrganization();
+        if (organization.urlKey !== urlKey) {
+          throw new WrongWorkspaceError(wrongWorkspaceMessage(workspace, organization.urlKey));
+        }
+        const plan = planCompletionCheck(items, await client.getTickets([...items.keys()]));
+        notVisible = plan.notVisible;
+        if (notVisible.length > 0) {
+          this.notifyOnce(
+            urlKey,
+            "not-visible",
+            `Flow Linear, ${workspace.displayName}: ${notVisibleMessage(notVisible)}`
+          );
+        }
+        await this.carryOut(api, workspace, plan);
       }
       this.refusedKeys.delete(urlKey);
-      this.statuses.set(urlKey, { lastSuccessAt: this.now() });
+      this.statuses.set(urlKey, {
+        lastSuccessAt: this.now(),
+        ...(notVisible.length > 0 ? { notVisible } : {}),
+      });
     } catch (error) {
       // Flow unloaded mid-check and its API now refuses writes; it will be found again
-      if (this.deps.getFlowApi() !== api || this.stopped) return;
+      if (!this.stillConnected(api)) return;
       this.handleError(workspace, apiKey, error);
     }
   }
 
-  /** Complete each item. One that has gone or is already complete counts as done. */
-  private async complete(
+  /**
+   * Relink moved tickets' items, then complete finished ones. A change to an item that has
+   * gone, or that is already complete, counts as done.
+   */
+  private async carryOut(
     api: FlowApi,
     workspace: WorkspaceSettings,
-    toComplete: ItemToComplete[]
+    plan: CompletionPlan
   ): Promise<void> {
-    let firstError: Error | null = null;
-    for (const { itemId, identifier, reason } of toComplete) {
-      if (this.stopped) return;
-      if (reason === "deleted") {
-        console.warn(
-          `Flow Linear: ${identifier} is no longer in ${workspace.displayName}, so its Focus item was completed`
-        );
-      }
+    const failures: Error[] = [];
+    const attempt = async (itemId: string, change: () => Promise<void>): Promise<boolean> => {
       try {
-        await api.completeFocusItem(itemId);
+        await change();
+        return true;
       } catch (error) {
         const current = await api.getFocusItems(SOURCE_NAME);
         const item = current.find((entry) => entry.id === itemId);
         if (item && item.completedAt === undefined) {
-          firstError ??= error instanceof Error ? error : new Error(String(error));
+          failures.push(error instanceof Error ? error : new Error(String(error)));
         }
+        return false;
+      }
+    };
+
+    for (const { itemId, url } of plan.relink) {
+      if (!this.stillConnected(api)) return;
+      await attempt(itemId, () => api.updateFocusItem(itemId, { url }));
+    }
+    for (const { itemId, identifier, reason } of plan.complete) {
+      if (!this.stillConnected(api)) return;
+      const completed = await attempt(itemId, () => api.completeFocusItem(itemId));
+      if (completed && reason === "deleted") {
+        console.warn(
+          `Flow Linear: ${identifier} was deleted in ${workspace.displayName}, so its Focus item was completed`
+        );
       }
     }
-    if (firstError) throw firstError;
+    if (failures.length > 0) throw failures[0];
   }
 
   private handleError(workspace: WorkspaceSettings, apiKey: string, error: unknown): void {
@@ -184,6 +256,10 @@ export class CompletionChecker {
     const message = errorMessage(error);
     this.statuses.set(urlKey, { ...this.getStatus(urlKey), error: message });
 
+    if (error instanceof WrongWorkspaceError) {
+      this.notifyOnce(urlKey, "wrong-workspace", message);
+      return;
+    }
     if (!(error instanceof LinearError)) {
       console.error(`Flow Linear check failed for ${displayName}`, error);
       this.notifyOnce(urlKey, "other", `Flow Linear couldn't check ${displayName}: ${message}`);

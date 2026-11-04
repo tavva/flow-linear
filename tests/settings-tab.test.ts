@@ -86,16 +86,16 @@ describe("FlowLinearSettingTab", () => {
     unload(plugin);
   });
 
-  it("stores the interval and restarts the check timer", async () => {
+  it("stores the interval", async () => {
     const { tab, plugin, group } = await setUp();
-    const restart = jest.spyOn(plugin, "restartCheckInterval");
+    const save = jest.spyOn(plugin, "saveSettings");
     const intervalControl = group("Checking Linear").items[0].control;
     expect(intervalControl?.validate?.(0)).toBe("Check at least once a minute.");
     expect(intervalControl?.validate?.(2)).toBeUndefined();
 
     await tab.setControlValue("checkIntervalMinutes", 2.6);
     expect(tab.getControlValue("checkIntervalMinutes")).toBe(3);
-    expect(restart).toHaveBeenCalled();
+    expect(save).toHaveBeenCalled();
     unload(plugin);
   });
 
@@ -148,6 +148,15 @@ describe("old Flow warning", () => {
 });
 
 describe("describeStatus", () => {
+  it("adds the tickets the key couldn't see", () => {
+    expect(
+      describeStatus({ lastSuccessAt: Date.UTC(2026, 10, 4, 9), notVisible: ["ABC-12", "ABC-40"] })
+    ).toMatch(/^Last checked .+\. 2 tickets not visible with this key: ABC-12, ABC-40$/);
+    expect(describeStatus({ lastSuccessAt: 1, notVisible: ["ABC-12"] })).toMatch(
+      /1 ticket not visible with this key: ABC-12$/
+    );
+  });
+
   it("prefers the error, then the last check time", () => {
     expect(describeStatus({ error: "No API key on this device", lastSuccessAt: 5 })).toBe(
       "Last error: No API key on this device"

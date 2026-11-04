@@ -75,10 +75,32 @@ describe("lookUp", () => {
     const { addTicket, linear } = setUp();
     expect(await addTicket.lookUp("https://linear.app/testco/issue/TST-1")).toEqual({
       ok: false,
-      error: "TST-1 wasn't found in Testco.",
+      error: "TST-1 wasn't found in Testco, or this key can't see it.",
     });
     linear.tickets = [ticket("TST-1", { trashed: true })];
     expect((await addTicket.lookUp("https://linear.app/testco/issue/TST-1")).ok).toBe(false);
+  });
+
+  it("refuses when the key belongs to another Linear workspace", async () => {
+    const { addTicket, linear } = setUp();
+    linear.urlKey = "otherco";
+    linear.tickets = [ticket("TST-1")];
+    expect(await addTicket.lookUp("https://linear.app/testco/issue/TST-1")).toEqual({
+      ok: false,
+      error:
+        'The API key for Testco belongs to the Linear workspace "otherco", not "testco". Check the key in Flow Linear\'s settings.',
+    });
+    expect(linear.calls).toEqual(["getOrganization"]);
+  });
+
+  it("refuses a ticket whose link points outside the workspace", async () => {
+    const { addTicket, linear } = setUp();
+    linear.tickets = [ticket("TST-1", { url: "https://linear.app/otherco/issue/TST-1/x" })];
+    expect(await addTicket.lookUp("https://linear.app/testco/issue/TST-1")).toEqual({
+      ok: false,
+      error:
+        "Linear gave a link for TST-1 outside Testco: https://linear.app/otherco/issue/TST-1/x",
+    });
   });
 
   it.each([
@@ -158,11 +180,14 @@ describe("add", () => {
 
   it("reports a Focus write that Flow rejects", async () => {
     const { addTicket, linear, focus } = setUp();
-    linear.tickets = [ticket("TST-4", { url: "linear://not-a-web-link" })];
+    linear.tickets = [ticket("TST-4")];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
+    focus.addFocusItem = async () => {
+      throw new Error("Focus item sphere must not be empty");
+    };
 
     expect(await addTicket.add(result, "Wording", "work")).toBe(
-      "Couldn't add the ticket to Focus: Focus item url must be an http or https link"
+      "Couldn't add the ticket to Focus: Focus item sphere must not be empty"
     );
     expect(focus.items).toEqual([]);
   });
