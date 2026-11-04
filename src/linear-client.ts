@@ -46,6 +46,13 @@ export interface LinearWorkspaceClient {
 
 const TICKET_FIELDS = `id identifier url title trashed state { type }`;
 
+/** Every query the plugin sends. scripts/probe-linear.mjs sends the same ones. */
+export const QUERIES = {
+  organization: `query { viewer { organization { name urlKey } } }`,
+  issue: `query ($id: String!) { issue(id: $id) { ${TICKET_FIELDS} } }`,
+  issues: `query ($filter: IssueFilter, $after: String) { issues(filter: $filter, first: ${BATCH_SIZE}, after: $after, includeArchived: true) { nodes { ${TICKET_FIELDS} } pageInfo { hasNextPage endCursor } } }`,
+};
+
 interface TicketNode {
   id: string;
   identifier: string;
@@ -116,17 +123,16 @@ export class LinearClient implements LinearWorkspaceClient {
 
   async getOrganization(): Promise<LinearOrganization> {
     const data = await this.query<{ viewer: { organization: LinearOrganization } }>(
-      `query { viewer { organization { name urlKey } } }`
+      QUERIES.organization
     );
     return data.viewer.organization;
   }
 
   async getTicketByIdentifier(identifier: string): Promise<LinearTicket | null> {
     try {
-      const data = await this.query<{ issue: TicketNode | null }>(
-        `query ($id: String!) { issue(id: $id) { ${TICKET_FIELDS} } }`,
-        { id: identifier }
-      );
+      const data = await this.query<{ issue: TicketNode | null }>(QUERIES.issue, {
+        id: identifier,
+      });
       return data.issue ? toTicket(data.issue) : null;
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -167,15 +173,7 @@ export class LinearClient implements LinearWorkspaceClient {
     const tickets: LinearTicket[] = [];
     let after: string | null = null;
     do {
-      const data: IssuePage = await this.query<IssuePage>(
-        `query ($filter: IssueFilter, $after: String) {
-          issues(filter: $filter, first: ${BATCH_SIZE}, after: $after, includeArchived: true) {
-            nodes { ${TICKET_FIELDS} }
-            pageInfo { hasNextPage endCursor }
-          }
-        }`,
-        { filter, after }
-      );
+      const data: IssuePage = await this.query<IssuePage>(QUERIES.issues, { filter, after });
       tickets.push(...data.issues.nodes.map(toTicket));
       after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
     } while (after);
