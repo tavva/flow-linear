@@ -37,8 +37,10 @@ export default defineConfig([
           ignoreRegex: [
             // Example Linear links shown as placeholders
             "^https://linear\\.app/",
-            // Help text quoting Linear's key format and the names on its settings page
-            "lin_api_",
+            // Linear's key format, shown as a placeholder
+            "^lin_api_",
+            // Help text naming the page in Linear's settings where keys are made
+            "Settings → Security & access",
           ],
         },
       ],

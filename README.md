@@ -38,13 +38,10 @@ else there.
    limit the key to the teams whose tickets you'll add. (Your workspace's admins
    may need to allow members to create API keys.)
 2. In Obsidian, open **Settings → Flow Linear** and click **Add workspace**.
-3. Under **Linear API key**, pick a key you've saved by its name, or create one.
-   When creating one, the **ID** is just a name for the key, such as
-   `linear-acme`, and the **value** is the key itself, which starts with
-   `lin_api_` (ignore the example value Obsidian shows). Obsidian keeps the key in
-   its secret storage on this device; only the name goes into Flow Linear's synced
-   settings. Flow Linear checks the key with Linear and fills in the workspace for
-   you.
+3. Paste the key (it starts with `lin_api_`) into **Linear API key**. Flow Linear
+   checks it with Linear, fills in the workspace for you, and stores the key in
+   Obsidian's secret storage on this device only. Its synced settings hold just the
+   name the key is stored under.
 4. Optionally give the workspace a display name (shown on its Focus items) and pick
    the sphere new items go into.
 
@@ -54,7 +51,10 @@ check is 30 seconds after Obsidian starts). **Status** shows each workspace's la
 check or last error.
 
 API keys are stored per device, so enter them on each computer where you want
-Flow Linear to run. A device without a key leaves that workspace alone. Running it
+Flow Linear to run: on another device the workspace arrives with your synced
+settings, and its **Change key** button lets you enter the key there. **Change
+key** also replaces a key, and removing a workspace clears its key from this
+device. A device without a key leaves that workspace alone. Running it
 on several devices is harmless: completing an item twice keeps the first time.
 
 ## Network use

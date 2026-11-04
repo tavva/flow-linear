@@ -71,3 +71,16 @@ export function clampInterval(minutes: number): number {
   if (!Number.isFinite(minutes)) return DEFAULT_CHECK_INTERVAL_MINUTES;
   return Math.max(MIN_CHECK_INTERVAL_MINUTES, Math.round(minutes));
 }
+
+/**
+ * The SecretStorage name the plugin keeps a workspace's key under. Secret names allow only
+ * lower-case letters, digits and dashes.
+ */
+export function secretNameFor(urlKey: string): string {
+  const slug = urlKey
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `flow-linear-${slug || "workspace"}`;
+}

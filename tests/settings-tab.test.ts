@@ -4,7 +4,7 @@
 import { Events, FakeElement, Modal, Setting } from "obsidian";
 import FlowLinearPlugin from "../src/main";
 import { describeStatus, FlowLinearSettingTab, OLD_FLOW_WARNING } from "../src/settings-tab";
-import { WorkspaceModal } from "../src/workspace-modal";
+import { ApiKeyModal, WorkspaceModal } from "../src/workspace-modal";
 import { workspace } from "./helpers/builders";
 
 type Group = {
@@ -25,9 +25,13 @@ function unload(plugin: FlowLinearPlugin): void {
 }
 
 async function setUp() {
+  const secrets = new Map<string, string>([["linear-thirdco", "lin_api_third"]]);
   const app = {
     workspace: Object.assign(new Events(), { onLayoutReady: () => {} }),
-    secretStorage: { getSecret: () => null },
+    secretStorage: {
+      getSecret: (name: string) => secrets.get(name) ?? null,
+      setSecret: (name: string, value: string) => secrets.set(name, value),
+    },
   };
   const plugin = new FlowLinearPlugin(app as never, {} as never);
   await plugin.onload();
@@ -39,8 +43,10 @@ async function setUp() {
     if (!found) throw new Error(`No group ${heading}`);
     return found;
   };
-  return { plugin, tab, groups, group };
+  return { plugin, tab, groups, group, secrets };
 }
+
+type ModalWithDeps = { deps: { onSave(...args: unknown[]): Promise<void> } };
 
 beforeEach(() => {
   // setImmediate stays real so tests can wait for button handlers to finish
@@ -57,15 +63,15 @@ describe("FlowLinearSettingTab", () => {
     const list = group("Workspaces");
     expect(list.type).toBe("list");
     expect(list.heading).toBe("Workspaces");
-    expect(list.items).toEqual([
+    expect(list.items.map(({ name, desc }) => ({ name, desc }))).toEqual([
       { name: "Testco", desc: "testco · default sphere: work" },
       { name: "otherco", desc: "otherco · default sphere: Flow's first sphere" },
     ]);
     unload(plugin);
   });
 
-  it("deletes a workspace from the current list and saves", async () => {
-    const { group, plugin, tab } = await setUp();
+  it("deletes a workspace from the current list, clears its key and saves", async () => {
+    const { group, plugin, tab, secrets } = await setUp();
     const save = jest.spyOn(plugin, "saveSettings");
     const list = group("Workspaces");
     // Settings reloaded from another device after the tab was drawn
@@ -73,16 +79,40 @@ describe("FlowLinearSettingTab", () => {
     list.onDelete?.(1);
     await new Promise((resolve) => setImmediate(resolve));
     expect(plugin.settings.workspaces.map((w) => w.urlKey)).toEqual(["testco"]);
+    // SecretStorage can't delete, so the key is overwritten with an empty value
+    expect(secrets.get("linear-thirdco")).toBe("");
+    expect(plugin.getSecret("linear-thirdco")).toBe("");
     expect(save).toHaveBeenCalled();
     expect((tab as unknown as { updates: number }).updates).toBe(1);
     unload(plugin);
   });
 
-  it("opens the workspace form from the add button", async () => {
+  it("adds a workspace from the add button, storing its key under the plugin's name", async () => {
     Modal.opened = [];
-    const { group, plugin } = await setUp();
+    const { group, plugin, secrets } = await setUp();
     group("Workspaces").addItem?.action({});
     expect(Modal.opened[0]).toBeInstanceOf(WorkspaceModal);
+
+    const added = workspace("newco", { apiKeySecretName: "flow-linear-newco" });
+    await (Modal.opened[0] as unknown as ModalWithDeps).deps.onSave(added, "lin_api_new");
+
+    expect(secrets.get("flow-linear-newco")).toBe("lin_api_new");
+    expect(plugin.settings.workspaces.map((w) => w.urlKey)).toContain("newco");
+    unload(plugin);
+  });
+
+  it("replaces a workspace's key from its Change key button", async () => {
+    Modal.opened = [];
+    const { group, plugin, secrets } = await setUp();
+    const setting = new Setting(new FakeElement());
+    group("Workspaces").items[0].render?.(setting);
+    expect(setting.buttons[0].text).toBe("Change key");
+
+    await setting.buttons[0].click();
+    expect(Modal.opened[0]).toBeInstanceOf(ApiKeyModal);
+    await (Modal.opened[0] as unknown as ModalWithDeps).deps.onSave("lin_api_replaced");
+
+    expect(secrets.get("linear-testco")).toBe("lin_api_replaced");
     unload(plugin);
   });
 

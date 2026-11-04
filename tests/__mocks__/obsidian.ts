@@ -243,27 +243,6 @@ export class ButtonComponent {
   }
 }
 
-export class SecretComponent {
-  static created: SecretComponent[] = [];
-  private handler: ChangeHandler<string> = () => {};
-  constructor(
-    public app: unknown,
-    public containerEl: unknown
-  ) {
-    SecretComponent.created.push(this);
-  }
-  setValue(): this {
-    return this;
-  }
-  onChange(handler: ChangeHandler<string>): this {
-    this.handler = handler;
-    return this;
-  }
-  choose(name: string): void {
-    this.handler(name);
-  }
-}
-
 /** A settings row; every row made is listed in Setting.created so tests can find it by name. */
 export class Setting {
   static created: Setting[] = [];

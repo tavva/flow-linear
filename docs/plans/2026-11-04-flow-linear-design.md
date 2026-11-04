@@ -43,17 +43,27 @@ The settings tab is declarative (`getSettingDefinitions()`, Obsidian 1.13), so
   Linear items from Focus, and that the deletion syncs to every device. The
   README says the same in its setup section.
 - **Workspaces**: a `type: 'list'` setting. Adding one opens a form modal:
-  - _API key_: a `SecretComponent`. Settings store the secret's name, never
-    its value (see "Secrets" below). The README asks for a key with Read
-    permission only, which Linear's personal API keys allow (optionally
-    limited to chosen teams).
+  - _Linear API key_: one password field, placeholder `lin_api_…`. Obsidian's
+    `SecretComponent` picker asks for a secret "ID" and shows an `sk-…`
+    example, which confused setup, so the plugin names the secret itself.
+    The README asks for a key with Read permission only, which Linear's
+    personal API keys allow (optionally limited to chosen teams).
   - On save the plugin queries `viewer { organization { name urlKey } }` with
     the key. That checks the key works and fills in the workspace's `urlKey`,
-    so you never type the slug.
+    so you never type the slug. It then stores the key with
+    `app.secretStorage.setSecret("flow-linear-<urlKey>", key)` (the `urlKey`
+    reduced to the lower-case letters, digits and dashes secret names allow)
+    and records that name as `apiKeySecretName`. Settings never hold the key.
   - _Display name_: defaults to the organisation's name. Used as the Focus
     item's `sourceLabel` (the chip in Focus and the heading on the TV board).
   - _Default sphere_: a dropdown of Flow's spheres (`getSpheres()`).
-  - Each row shows its display name and `urlKey`; rows can be deleted.
+  - Each row shows its display name and `urlKey`, and a "Change key" button
+    that opens the same password field, checks the new key belongs to the
+    same workspace, and stores it under the workspace's secret name. It's
+    also how a key is entered on another device, where the workspace arrives
+    through synced settings without one.
+  - Rows can be deleted. SecretStorage has no delete, so deleting a workspace
+    overwrites its secret with an empty value, which reads as no key.
 - **Check every**: minutes between checks, default 5, minimum 1.
 - **Status**: a read-only row per workspace with the last successful check
   time or the last error.
@@ -297,8 +307,8 @@ the [obsidianmd ESLint plugin](https://github.com/obsidianmd/eslint-plugin)
 | No hardcoded styles                                                                             | Classes in `styles.css`, prefixed `flow-linear-`; no `element.style`                                                                                |
 | Avoid needless console logging | Errors via `console.error`, and one `console.warn` when a deleted ticket's item is completed; no routine logging |
 | Handle promises                                                                                 | `no-misused-promises` and `no-floating-promises`; fire-and-forget calls use `void` with `.catch` that records the status                            |
-| Store API keys in SecretStorage                                                                 | `SecretComponent` in the workspace form; settings store only the secret name                                                                        |
-| Declarative settings tab                                                                        | `getSettingDefinitions()` with a `list` for workspaces and `render` for the `SecretComponent` row; no `display()`                                   |
+| Store API keys in SecretStorage | Keys stored with `app.secretStorage.setSecret` under a name the plugin chooses; settings store only that name. Obsidian's guide shows `SecretComponent`, but no lint rule or policy requires it |
+| Declarative settings tab | `getSettingDefinitions()` with a `list` for workspaces (each row a `render` with a Change key button); no `display()` |
 | Supply chain: few dependencies, exact pins, lockfile, no postinstall                            | No runtime dependencies (GraphQL sent as plain strings over `requestUrl`); dev dependencies pinned to exact versions; `package-lock.json` committed |
 
 ## Tooling

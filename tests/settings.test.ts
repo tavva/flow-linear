@@ -1,7 +1,7 @@
 // ABOUTME: Tests reading stored data into complete settings.
 // ABOUTME: Malformed or missing data must fall back to defaults rather than break loading.
 
-import { clampInterval, defaultSettings, readSettings } from "../src/settings";
+import { clampInterval, defaultSettings, readSettings, secretNameFor } from "../src/settings";
 
 describe("readSettings", () => {
   it("returns defaults when nothing is stored", () => {
@@ -59,5 +59,13 @@ describe("clampInterval", () => {
     expect(clampInterval(2.4)).toBe(2);
     expect(clampInterval(-5)).toBe(1);
     expect(clampInterval(Number.NaN)).toBe(5);
+  });
+});
+
+describe("secretNameFor", () => {
+  it("names the secret after the workspace, with only the characters secret names allow", () => {
+    expect(secretNameFor("acme")).toBe("flow-linear-acme");
+    expect(secretNameFor("Acme_Corp.io")).toBe("flow-linear-acme-corp-io");
+    expect(secretNameFor("--")).toBe("flow-linear-workspace");
   });
 });

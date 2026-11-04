@@ -94,6 +94,23 @@ export default class FlowLinearPlugin extends Plugin {
     return this.app.secretStorage.getSecret(name);
   }
 
+  storeSecret(name: string, value: string): void {
+    this.app.secretStorage.setSecret(name, value);
+  }
+
+  /**
+   * SecretStorage has no way to delete a secret, so a removed workspace's key is overwritten
+   * with an empty value, which reads as no key.
+   */
+  clearSecret(name: string): void {
+    if (name === "") return;
+    try {
+      this.app.secretStorage.setSecret(name, "");
+    } catch (error) {
+      console.error(`Flow Linear couldn't clear the secret ${name}`, error);
+    }
+  }
+
   /** data.json changed on disk, as when the vault's sync brings another device's settings. */
   async onExternalSettingsChange(): Promise<void> {
     // Replace contents rather than the object, so the settings tab and a running check see them

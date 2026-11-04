@@ -4,8 +4,8 @@
 import { App, PluginSettingTab, SettingDefinitionItem } from "obsidian";
 import type FlowLinearPlugin from "./main";
 import { notVisibleMessage, WorkspaceStatus } from "./completion";
-import { clampInterval, MIN_CHECK_INTERVAL_MINUTES } from "./settings";
-import { WorkspaceModal } from "./workspace-modal";
+import { clampInterval, MIN_CHECK_INTERVAL_MINUTES, WorkspaceSettings } from "./settings";
+import { ApiKeyModal, WorkspaceModal } from "./workspace-modal";
 
 export const OLD_FLOW_WARNING =
   "If any device that syncs this vault runs Flow 1.3.12 or earlier, it will delete your Linear items from Focus, and that deletion syncs to every device. Update Flow on every device before using Flow Linear.";
@@ -55,6 +55,11 @@ export class FlowLinearSettingTab extends PluginSettingTab {
         items: workspaces.map((workspace) => ({
           name: workspace.displayName,
           desc: `${workspace.urlKey} · default sphere: ${workspace.defaultSphere || "Flow's first sphere"}`,
+          render: (setting) => {
+            setting.addButton((button) =>
+              button.setButtonText("Change key").onClick(() => this.openApiKeyModal(workspace))
+            );
+          },
         })),
       },
       {
@@ -101,7 +106,8 @@ export class FlowLinearSettingTab extends PluginSettingTab {
 
   // Reads the list at the time of the click, not when the tab was drawn
   private async deleteWorkspace(index: number): Promise<void> {
-    this.plugin.settings.workspaces.splice(index, 1);
+    const [removed] = this.plugin.settings.workspaces.splice(index, 1);
+    if (removed) this.plugin.clearSecret(removed.apiKeySecretName);
     await this.plugin.saveSettings();
     this.update();
   }
@@ -116,11 +122,23 @@ export class FlowLinearSettingTab extends PluginSettingTab {
     new WorkspaceModal(this.app, {
       existing: this.plugin.settings.workspaces,
       spheres: this.plugin.flowApi?.getSpheres() ?? [],
-      getSecret: (name) => this.plugin.getSecret(name),
       createClient: (apiKey) => this.plugin.createClient(apiKey),
-      onSave: async (workspace) => {
+      onSave: async (workspace, apiKey) => {
+        this.plugin.storeSecret(workspace.apiKeySecretName, apiKey);
         this.plugin.settings.workspaces.push(workspace);
         await this.plugin.saveSettings();
+        this.update();
+        this.plugin.requestCheck();
+      },
+    }).open();
+  }
+
+  private openApiKeyModal(workspace: WorkspaceSettings): void {
+    new ApiKeyModal(this.app, {
+      workspace,
+      createClient: (apiKey) => this.plugin.createClient(apiKey),
+      onSave: async (apiKey) => {
+        this.plugin.storeSecret(workspace.apiKeySecretName, apiKey);
         this.update();
         this.plugin.requestCheck();
       },
