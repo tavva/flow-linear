@@ -3,8 +3,9 @@ This file provides guidance to Claude Code and other agents when working with co
 ## Project overview
 
 Flow Linear is an Obsidian plugin that adds chosen Linear tickets to the Focus
-list of the Flow plugin (github.com/tavva/flow) and keeps a Linear label in step
-with them. It works only through Flow's public Focus API.
+list of the Flow plugin (github.com/tavva/flow), and completes their Focus items
+when the tickets are done in Linear. It works only through Flow's public Focus
+API, and only reads from Linear.
 
 Design: `docs/plans/2026-11-04-flow-linear-design.md`.
 
@@ -14,7 +15,8 @@ Design: `docs/plans/2026-11-04-flow-linear-design.md`.
   guidelines; the design's "Guidelines compliance" section lists what applies.
 - API keys live in Obsidian SecretStorage, never in `data.json`. Keep
   `docs/secrets.md` up to date.
-- All network calls go through `requestUrl`, only to `api.linear.app`.
+- All network calls go through `requestUrl`, only to `api.linear.app`, and are
+  read-only: no GraphQL mutations.
 - All source files start with two `ABOUTME:` comment lines.
 - British English in docs and comments; UI text in sentence case.
 
@@ -33,30 +35,18 @@ npm run release       # Production release workflow
 ## Layout
 
 - `src/main.ts`: plugin entry; finds Flow's API, follows `flow:api-ready` and
-  `flow:api-unloaded`, debounces Focus changes into syncs, runs the check interval.
+  `flow:api-unloaded`, waits `STARTUP_CHECK_DELAY_MS`, runs the check interval.
 - `src/flow-api.ts`: the copy of Flow's `FlowApi` types that Flow Linear uses.
-- `src/linear-client.ts`: GraphQL over `requestUrl`, with error kinds.
-- `src/sync-decisions.ts`: the pure `decideSyncActions`; every sync rule lives here.
-- `src/sync-runner.ts`: fetches state, carries out actions, one run at a time,
-  confirms label removals on a later pass.
+- `src/linear-client.ts`: read-only GraphQL over `requestUrl`, with error kinds.
+- `src/completion.ts`: the pure `findItemsToComplete`, and the `CompletionChecker`
+  that runs it one check at a time.
 - `src/add-ticket.ts`, `src/workspace-form.ts`: logic behind the two modals.
 - `tests/`: Jest tests; `tests/helpers` has an in-memory Focus list implementing
-  `FlowApi` and an in-memory Linear workspace; `tests/fixtures` has recorded
-  Linear responses for the client tests.
+  `FlowApi` and an in-memory Linear workspace; `tests/fixtures` has Linear
+  responses for the client tests.
 
-Flow reports Flow Linear's own writes back as change events, and coalesces
-changes, so a sync must be safe to run at any time and do nothing when nothing
-has changed. Treat `removed` events and missing items as hints: imports, label
-adds for items from another device, label removals and item removals all wait
-for a pass at least `CONFIRM_DELAY_MS` later to call for them again (the
-`await` action). A device removes a label because items went only if it saw
-them unfinished itself (kept in local storage, not `data.json`). The first sync
-waits `STARTUP_SYNC_DELAY_MS` after connecting to Flow. Design:
-"Confirmation" and rule 5.
-
-"Labelled" means carrying the workspace-level label's id, never a label matched by
-name. A linked item whose ticket Linear doesn't return and that has no record is
-left alone; only a record whose UUID comes back missing counts as deleted.
+A check must be safe to run at any time, on any number of devices: it only
+calls `completeFocusItem`, which keeps the first completion time.
 
 ## Releasing
 

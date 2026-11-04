@@ -3,23 +3,19 @@
 
 import { FlowApi, SOURCE_NAME } from "./flow-api";
 import { LinearTicket, LinearWorkspaceClient } from "./linear-client";
-import { FlowLinearData, WorkspaceSettings } from "./settings";
-import { parseTicketUrl, ticketKey } from "./ticket-url";
+import { FlowLinearSettings, WorkspaceSettings } from "./settings";
+import { parseTicketUrl } from "./ticket-url";
 
 export interface AddTicketDeps {
   getFlowApi(): FlowApi | null;
-  getData(): FlowLinearData;
-  saveData(): Promise<void>;
+  getSettings(): FlowLinearSettings;
   getSecret(name: string): string | null;
   createClient(apiKey: string): LinearWorkspaceClient;
-  requestSync(): void;
-  markSeenUnfinished(ticketKey: string): void;
 }
 
 export interface FoundTicket {
   workspace: WorkspaceSettings;
   ticket: LinearTicket;
-  ticketKey: string;
 }
 
 export type LookUpResult = { ok: true; found: FoundTicket } | { ok: false; error: string };
@@ -38,7 +34,7 @@ export class AddTicket {
           "That isn't a Linear ticket link. It should look like https://linear.app/team/issue/ABC-123.",
       };
     }
-    const { workspaces } = this.deps.getData().settings;
+    const { workspaces } = this.deps.getSettings();
     const workspace = workspaces.find((w) => w.urlKey === ref.urlKey);
     if (!workspace) {
       const known = workspaces.map((w) => `${w.displayName} (${w.urlKey})`).join(", ");
@@ -59,7 +55,7 @@ export class AddTicket {
 
     let ticket: LinearTicket | null;
     try {
-      ticket = await this.deps.createClient(apiKey).getTicketByIdentifier(ref.identifier, []);
+      ticket = await this.deps.createClient(apiKey).getTicketByIdentifier(ref.identifier);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, error: `Couldn't fetch the ticket from Linear: ${message}` };
@@ -71,7 +67,7 @@ export class AddTicket {
       const state = ticket.stateType === "canceled" ? "cancelled" : "completed";
       return { ok: false, error: `${ticket.identifier} is already ${state} in Linear.` };
     }
-    return { ok: true, found: { workspace, ticket, ticketKey: ticketKey(ref) } };
+    return { ok: true, found: { workspace, ticket } };
   }
 
   /** Add the ticket to Focus. Returns an error message, or null once it's added. */
@@ -94,17 +90,6 @@ export class AddTicket {
       const message = error instanceof Error ? error.message : String(error);
       return `Couldn't add the ticket to Focus: ${message}`;
     }
-
-    // Always pending, even if synced: the label may have been removed in Linear since the last
-    // pass, and the next pass must add it back rather than remove the item just added
-    const { tickets } = this.deps.getData();
-    const existing = tickets[found.ticketKey];
-    tickets[found.ticketKey] = existing?.labelName
-      ? { issueId: found.ticket.id, label: "add-pending", labelName: existing.labelName }
-      : { issueId: found.ticket.id, label: "add-pending" };
-    this.deps.markSeenUnfinished(found.ticketKey);
-    await this.deps.saveData();
-    this.deps.requestSync();
     return null;
   }
 }

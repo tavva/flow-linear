@@ -3,7 +3,7 @@
 	"name": "Flow Linear",
 	"version": "0.1.0",
 	"minAppVersion": "1.13.0",
-	"description": "Add Linear tickets to Flow's Focus list and keep them in step with a Linear label.",
+	"description": "Add Linear tickets to Flow's Focus list and complete them when they're done in Linear.",
 	"author": "Ben Phillips",
 	"authorUrl": "https://github.com/tavva",
 	"isDesktopOnly": true

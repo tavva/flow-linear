@@ -8,6 +8,7 @@ import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import {
   LINEAR_GRAPHQL_URL,
   LinearClient,
+  BATCH_SIZE,
   LinearError,
   REQUEST_TIMEOUT_MS,
 } from "../src/linear-client";
@@ -81,132 +82,120 @@ describe("getOrganization", () => {
   });
 });
 
-describe("getLabelledTickets", () => {
-  it("follows pagination and parses tickets", async () => {
-    serve([200, "labelled-page-1"], [200, "labelled-page-2"]);
-    const tickets = await client.getLabelledTickets("label-uuid-1", ["label-uuid-1"]);
-
-    expect(tickets).toEqual([
-      {
-        id: "0b5c3e0a-1111-4c55-9a1e-000000000001",
-        identifier: "TST-1",
-        url: "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
-        title: "Write the onboarding guide",
-        stateType: "started",
-        labelIds: ["label-uuid-1", "label-uuid-bug"],
-        trashed: false,
-      },
-      {
-        id: "0b5c3e0a-1111-4c55-9a1e-000000000002",
-        identifier: "TST-2",
-        url: "https://linear.app/testco/issue/TST-2/fix-the-login-page",
-        title: "Fix the login page",
-        stateType: "unstarted",
-        labelIds: ["label-uuid-1"],
-        trashed: false,
-      },
-    ]);
-    expect(sentBody(0).variables).toEqual({
-      filter: { labels: { id: { eq: "label-uuid-1" } } },
-      after: null,
-      labelIds: ["label-uuid-1"],
-    });
-    // Only the plugin's labels are read from each ticket
-    expect(sentBody(0).query).toContain("labels(filter: { id: { in: $labelIds } })");
-    expect(sentBody(1).variables.after).toBe("cursor-1");
-  });
-});
-
-describe("getTicketsByIds", () => {
-  it("asks for nothing when there are no ids", async () => {
-    await expect(client.getTicketsByIds([], [])).resolves.toEqual([]);
-    expect(mockRequestUrl).not.toHaveBeenCalled();
-  });
-
-  it("filters by id and reports trashed tickets", async () => {
-    serve([200, "tracked-with-trashed"]);
-    const tickets = await client.getTicketsByIds(["a", "0b5c3e0a-1111-4c55-9a1e-000000000003"], []);
-    expect(tickets).toHaveLength(1);
-    expect(tickets[0].trashed).toBe(true);
-    expect(sentBody(0).variables.filter).toEqual({
-      id: { in: ["a", "0b5c3e0a-1111-4c55-9a1e-000000000003"] },
-    });
-  });
-
-  it("returns an empty list when none of the tickets exist", async () => {
-    serve([200, "no-issues"]);
-    await expect(client.getTicketsByIds(["gone"], [])).resolves.toEqual([]);
-  });
-});
-
 describe("getTicketByIdentifier", () => {
   it("looks the ticket up by identifier, which Linear also accepts for old identifiers", async () => {
     serve([200, "issue-found"]);
-    const ticket = await client.getTicketByIdentifier("OLD-2", ["label-uuid-1"]);
-    expect(ticket?.identifier).toBe("TST-2");
+    const ticket = await client.getTicketByIdentifier("OLD-2");
+    expect(ticket).toEqual({
+      id: "0b5c3e0a-1111-4c55-9a1e-000000000002",
+      identifier: "TST-2",
+      url: "https://linear.app/testco/issue/TST-2/fix-the-login-page",
+      title: "Fix the login page",
+      stateType: "unstarted",
+      trashed: false,
+    });
     expect(sentBody(0).query).toContain("issue(id: $id)");
-    expect(sentBody(0).variables).toEqual({ id: "OLD-2", labelIds: ["label-uuid-1"] });
+    expect(sentBody(0).variables).toEqual({ id: "OLD-2" });
   });
 
   it("returns null when Linear says there's no such ticket", async () => {
     serve([400, "error-entity-not-found"]);
-    await expect(client.getTicketByIdentifier("TST-99", [])).resolves.toBeNull();
+    await expect(client.getTicketByIdentifier("TST-99")).resolves.toBeNull();
   });
 
   it("passes on other errors", async () => {
     serve([400, "error-invalid-input"]);
-    expect((await linearError(client.getTicketByIdentifier("TST-1", []))).kind).toBe("api");
+    expect((await linearError(client.getTicketByIdentifier("TST-1"))).kind).toBe("api");
   });
 });
 
-describe("labels", () => {
-  it("finds a workspace-level label by name", async () => {
-    serve([200, "label-found"]);
-    await expect(client.findWorkspaceLabel("flow-focus")).resolves.toBe("label-uuid-1");
-    expect(sentBody(0).query).toContain("team: { null: true }");
-    expect(sentBody(0).variables).toEqual({ name: "flow-focus" });
+describe("getTickets", () => {
+  it("looks tickets up in one query by team key and number", async () => {
+    serve([200, "issues-batch"], [400, "error-entity-not-found"]);
+    const tickets = await client.getTickets(["TST-1", "TST-3", "TST-1", "TST-9"]);
+
+    expect(sentBody(0).variables).toEqual({
+      filter: {
+        or: [
+          { team: { key: { eq: "TST" } }, number: { eq: 1 } },
+          { team: { key: { eq: "TST" } }, number: { eq: 3 } },
+          { team: { key: { eq: "TST" } }, number: { eq: 9 } },
+        ],
+      },
+      after: null,
+    });
+    expect(sentBody(0).query).toContain("includeArchived: true");
+    expect([...tickets.keys()]).toEqual(["TST-1", "TST-3", "TST-9"]);
+    expect(tickets.get("TST-1")?.stateType).toBe("completed");
+    expect(tickets.get("TST-3")?.trashed).toBe(true);
+    // Missing from the batch, then not found on its own either
+    expect(sentBody(1).variables).toEqual({ id: "TST-9" });
+    expect(tickets.get("TST-9")).toBeNull();
   });
 
-  it("returns null when the workspace has no such label", async () => {
-    serve([200, "label-missing"]);
-    await expect(client.findWorkspaceLabel("flow-focus")).resolves.toBeNull();
+  it("finds a ticket that moved team by looking its old identifier up on its own", async () => {
+    serve([200, "no-issues"], [200, "issue-found"]);
+    const tickets = await client.getTickets(["OLD-2"]);
+    expect(tickets.get("OLD-2")?.identifier).toBe("TST-2");
   });
 
-  it("detects a team label with the name", async () => {
-    serve([200, "label-found"], [200, "label-missing"]);
-    await expect(client.hasTeamLabel("flow-focus")).resolves.toBe(true);
-    expect(sentBody(0).query).toContain("team: { null: false }");
-    await expect(client.hasTeamLabel("flow-focus")).resolves.toBe(false);
+  it("follows pagination", async () => {
+    serve([200, "issues-page-1"], [200, "issues-page-2"]);
+    const tickets = await client.getTickets(["TST-1", "TST-2"]);
+    expect(sentBody(1).variables.after).toBe("cursor-1");
+    expect(tickets.get("TST-2")?.title).toBe("Fix the login page");
   });
 
-  it("creates a workspace-level label without a team", async () => {
-    serve([200, "label-created"]);
-    await expect(client.createWorkspaceLabel("flow-focus")).resolves.toBe("label-uuid-new");
-    expect(sentBody(0).query).toContain("issueLabelCreate(input: { name: $name })");
+  it("asks in batches", async () => {
+    const identifiers = Array.from({ length: BATCH_SIZE + 1 }, (_, i) => `TST-${i + 1}`);
+    mockRequestUrl.mockImplementation(async (request) => {
+      const { variables } = JSON.parse(request.body as string);
+      const nodes = (variables.filter.or as { number: { eq: number } }[]).map(({ number }) => ({
+        id: `id-${number.eq}`,
+        identifier: `TST-${number.eq}`,
+        url: `https://linear.app/testco/issue/TST-${number.eq}`,
+        title: "T",
+        state: { type: "started" },
+      }));
+      return respond(
+        200,
+        JSON.stringify({ data: { issues: { nodes, pageInfo: { hasNextPage: false } } } })
+      );
+    });
+
+    const tickets = await client.getTickets(identifiers);
+
+    expect(mockRequestUrl).toHaveBeenCalledTimes(2);
+    expect(tickets.size).toBe(BATCH_SIZE + 1);
   });
 
-  it("fails when Linear doesn't create the label", async () => {
-    serve([
-      200,
-      JSON.stringify({ data: { issueLabelCreate: { success: false, issueLabel: null } } }),
-    ]);
-    expect((await linearError(client.createWorkspaceLabel("flow-focus"))).kind).toBe("api");
+  it("asks for nothing when there are no identifiers", async () => {
+    await expect(client.getTickets([])).resolves.toEqual(new Map());
+    expect(mockRequestUrl).not.toHaveBeenCalled();
   });
 
-  it("adds and removes one label by id", async () => {
-    serve([200, "label-added"], [200, "label-removed"]);
-    await client.addLabel("issue-1", "label-1");
-    await client.removeLabel("issue-1", "label-1");
-    expect(sentBody(0).query).toContain("issueAddLabel(id: $id, labelId: $labelId)");
-    expect(sentBody(1).query).toContain("issueRemoveLabel(id: $id, labelId: $labelId)");
-    expect(sentBody(1).variables).toEqual({ id: "issue-1", labelId: "label-1" });
+  it("looks a malformed identifier up on its own", async () => {
+    serve([400, "error-entity-not-found"]);
+    const tickets = await client.getTickets(["nonsense"]);
+    expect(tickets.get("nonsense")).toBeNull();
+    expect(mockRequestUrl).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("fails when Linear reports the label change didn't happen", async () => {
-    serve([200, "label-not-removed"]);
-    expect((await linearError(client.removeLabel("issue-1", "label-1"))).kind).toBe("api");
-    serve([200, JSON.stringify({ data: { issueAddLabel: { success: false } } })]);
-    expect((await linearError(client.addLabel("issue-1", "label-1"))).kind).toBe("api");
+describe("read-only", () => {
+  it("sends no mutations", async () => {
+    serve(
+      [200, "viewer"],
+      [200, "issue-found"],
+      [200, "issues-batch"],
+      [400, "error-entity-not-found"]
+    );
+    await client.getOrganization();
+    await client.getTicketByIdentifier("TST-2");
+    await client.getTickets(["TST-1", "TST-9"]);
+    for (const [request] of mockRequestUrl.mock.calls) {
+      expect(JSON.parse(request.body as string).query).not.toMatch(/\bmutation\b/);
+    }
   });
 });
 
@@ -235,7 +224,7 @@ describe("errors", () => {
 
   it("maps other GraphQL errors to an api error with Linear's message", async () => {
     serve([400, "error-invalid-input"]);
-    const error = await linearError(client.getLabelledTickets("label-uuid-1", []));
+    const error = await linearError(client.getTicketByIdentifier("TST-1"));
     expect(error.kind).toBe("api");
     expect(error.message).toBe("Argument Validation Error");
   });

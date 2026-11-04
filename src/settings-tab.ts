@@ -1,14 +1,14 @@
 // ABOUTME: Flow Linear's settings tab, built from declarative setting definitions.
-// ABOUTME: Lists workspaces, holds the label name and check interval, and shows each workspace's status.
+// ABOUTME: Lists workspaces, holds the check interval, and shows each workspace's status.
 
 import { App, PluginSettingTab, SettingDefinitionItem } from "obsidian";
 import type FlowLinearPlugin from "./main";
-import { clampInterval, DEFAULT_LABEL_NAME, MIN_CHECK_INTERVAL_MINUTES } from "./settings";
-import { WorkspaceStatus } from "./sync-runner";
+import { WorkspaceStatus } from "./completion";
+import { clampInterval, MIN_CHECK_INTERVAL_MINUTES } from "./settings";
 import { WorkspaceModal } from "./workspace-modal";
 
 export const OLD_FLOW_WARNING =
-  "If any device that syncs this vault runs Flow 1.3.12 or earlier, it will delete your Linear items from Focus, that deletion syncs to every device, and Flow Linear will then take the label off those tickets in Linear. Update Flow on every device before using Flow Linear.";
+  "If any device that syncs this vault runs Flow 1.3.12 or earlier, it will delete your Linear items from Focus, and that deletion syncs to every device. Update Flow on every device before using Flow Linear.";
 
 export function describeStatus(status: WorkspaceStatus): string {
   if (status.error) return `Last error: ${status.error}`;
@@ -58,36 +58,11 @@ export class FlowLinearSettingTab extends PluginSettingTab {
       },
       {
         type: "group",
-        heading: "Sync",
+        heading: "Checking Linear",
         items: [
           {
-            name: "Label name",
-            desc: "The Linear label that marks tickets in Focus. The same name is used in every workspace. Changes apply when you leave the field or press Enter.",
-            // Drawn by hand so a rename happens once, on commit, not on every keystroke
-            render: (setting) => {
-              setting.addText((text) => {
-                text.setPlaceholder(DEFAULT_LABEL_NAME).setValue(this.plugin.settings.labelName);
-                const commit = () => {
-                  const name = text.getValue().trim();
-                  if (name === "") {
-                    text.setValue(this.plugin.settings.labelName);
-                    return;
-                  }
-                  void this.plugin.renameLabel(name);
-                };
-                text.inputEl.addEventListener("blur", commit);
-                text.inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    commit();
-                  }
-                });
-              });
-            },
-          },
-          {
             name: "Check every",
-            desc: "Minutes between checks with Linear.",
+            desc: "Minutes between checks for tickets that are done, so their Focus items can be completed.",
             control: {
               type: "number",
               key: "checkIntervalMinutes",
@@ -105,7 +80,7 @@ export class FlowLinearSettingTab extends PluginSettingTab {
         visible: workspaces.length > 0,
         items: workspaces.map((workspace) => ({
           name: workspace.displayName,
-          desc: describeStatus(this.plugin.runner.getStatus(workspace.urlKey)),
+          desc: describeStatus(this.plugin.checker.getStatus(workspace.urlKey)),
         })),
       },
     ];
@@ -126,7 +101,6 @@ export class FlowLinearSettingTab extends PluginSettingTab {
   // Reads the list at the time of the click, not when the tab was drawn
   private async deleteWorkspace(index: number): Promise<void> {
     this.plugin.settings.workspaces.splice(index, 1);
-    this.plugin.bumpSettingsGeneration();
     await this.plugin.saveSettings();
     this.update();
   }
@@ -147,7 +121,7 @@ export class FlowLinearSettingTab extends PluginSettingTab {
         this.plugin.settings.workspaces.push(workspace);
         await this.plugin.saveSettings();
         this.update();
-        this.plugin.requestSync();
+        this.plugin.requestCheck();
       },
     }).open();
   }

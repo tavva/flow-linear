@@ -1,68 +1,56 @@
-// ABOUTME: Tests reading stored data into complete settings and ticket records.
+// ABOUTME: Tests reading stored data into complete settings.
 // ABOUTME: Malformed or missing data must fall back to defaults rather than break loading.
 
-import { clampInterval, defaultSettings, readStoredData } from "../src/settings";
+import { clampInterval, defaultSettings, readSettings } from "../src/settings";
 
-describe("readStoredData", () => {
+describe("readSettings", () => {
   it("returns defaults when nothing is stored", () => {
-    expect(readStoredData(null)).toEqual({ settings: defaultSettings(), tickets: {} });
+    expect(readSettings(null)).toEqual(defaultSettings());
     expect(defaultSettings()).toEqual({
       workspaces: [],
-      labelName: "flow-focus",
       checkIntervalMinutes: 5,
       oldFlowWarningDismissed: false,
     });
   });
 
-  it("keeps well-formed settings and records", () => {
+  it("keeps well-formed settings", () => {
     const stored = {
-      settings: {
-        workspaces: [
-          {
-            urlKey: "acme",
-            displayName: "Acme",
-            apiKeySecretName: "linear-acme",
-            defaultSphere: "work",
-          },
-        ],
-        labelName: "ben-focus",
-        checkIntervalMinutes: 10,
-        oldFlowWarningDismissed: true,
-      },
-      tickets: { "acme/ABC-1": { issueId: "uuid-1", label: "add-pending" } },
+      workspaces: [
+        {
+          urlKey: "acme",
+          displayName: "Acme",
+          apiKeySecretName: "linear-acme",
+          defaultSphere: "work",
+        },
+      ],
+      checkIntervalMinutes: 10,
+      oldFlowWarningDismissed: true,
     };
-    expect(readStoredData(stored)).toEqual(stored);
+    expect(readSettings(stored)).toEqual(stored);
   });
 
-  it("drops malformed workspaces, duplicates and records", () => {
-    const data = readStoredData({
-      settings: {
-        workspaces: [
-          { urlKey: "", apiKeySecretName: "x" },
-          "nonsense",
-          { urlKey: "a", apiKeySecretName: "key-a" },
-          { urlKey: "a", apiKeySecretName: "key-b" },
-        ],
-        labelName: "  ",
-        checkIntervalMinutes: 0,
-      },
-      tickets: {
-        "a/A-1": { issueId: "", label: "synced" },
-        "a/A-2": { issueId: "uuid", label: "maybe" },
-        "a/A-3": null,
-        "a/A-4": { issueId: "uuid-4", label: "remove-pending" },
-      },
+  it("drops malformed workspaces and duplicates, and unknown fields", () => {
+    const settings = readSettings({
+      workspaces: [
+        { urlKey: "", apiKeySecretName: "x" },
+        "nonsense",
+        { urlKey: "a", apiKeySecretName: "key-a" },
+        { urlKey: "a", apiKeySecretName: "key-b" },
+      ],
+      checkIntervalMinutes: 0,
+      oldFlowWarningDismissed: "yes",
+      labelName: "flow-focus",
     });
-    expect(data.settings.workspaces).toEqual([
-      { urlKey: "a", displayName: "a", apiKeySecretName: "key-a", defaultSphere: "" },
-    ]);
-    expect(data.settings.labelName).toBe("flow-focus");
-    expect(data.settings.checkIntervalMinutes).toBe(1);
-    expect(data.tickets).toEqual({ "a/A-4": { issueId: "uuid-4", label: "remove-pending" } });
+    expect(settings).toEqual({
+      workspaces: [{ urlKey: "a", displayName: "a", apiKeySecretName: "key-a", defaultSphere: "" }],
+      checkIntervalMinutes: 1,
+      oldFlowWarningDismissed: false,
+    });
   });
 
-  it("ignores settings and tickets of the wrong type", () => {
-    expect(readStoredData({ settings: [], tickets: [] })).toEqual(readStoredData(undefined));
+  it("ignores data of the wrong type", () => {
+    expect(readSettings([])).toEqual(defaultSettings());
+    expect(readSettings({ workspaces: "none" })).toEqual(defaultSettings());
   });
 });
 

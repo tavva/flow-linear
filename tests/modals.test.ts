@@ -4,7 +4,7 @@
 import { FakeElement, SecretComponent, Setting } from "obsidian";
 import { AddTicket } from "../src/add-ticket";
 import { AddTicketModal } from "../src/add-ticket-modal";
-import { readStoredData, WorkspaceSettings } from "../src/settings";
+import { readSettings, WorkspaceSettings } from "../src/settings";
 import { WorkspaceModal } from "../src/workspace-modal";
 import { ticket, workspace } from "./helpers/builders";
 import { FocusStore } from "./helpers/focus-store";
@@ -51,27 +51,21 @@ describe("AddTicketModal", () => {
     const focus = new FocusStore();
     const linear = new LinearWorkspace();
     linear.tickets = [ticket("TST-4", { title: "Ship the release" })];
-    const data = readStoredData(null);
-    data.settings.workspaces = [workspace("testco", { defaultSphere: "work" })];
-    let syncs = 0;
+    const settings = readSettings(null);
+    settings.workspaces = [workspace("testco", { defaultSphere: "work" })];
     const addTicket = new AddTicket({
       getFlowApi: () => focus,
-      getData: () => data,
-      saveData: async () => {},
+      getSettings: () => settings,
       getSecret: () => "key",
       createClient: () => linear,
-      requestSync: () => {
-        syncs++;
-      },
-      markSeenUnfinished: () => {},
     });
     const modal = new AddTicketModal({} as never, addTicket, () => focus.getSpheres());
     modal.open();
-    return { modal, focus, data, syncs: () => syncs };
+    return { modal, focus };
   }
 
   it("finds the ticket, offers its title and the workspace's sphere, and adds it", async () => {
-    const { modal, focus, data, syncs } = open();
+    const { modal, focus } = open();
     expect((modal as unknown as { title: string }).title).toBe("Add Linear ticket to Focus");
 
     row("Ticket link").texts[0].type("https://linear.app/testco/issue/TST-4/ship");
@@ -88,8 +82,6 @@ describe("AddTicketModal", () => {
 
     expect(focus.items).toHaveLength(1);
     expect(focus.items[0]).toMatchObject({ text: "Write the release notes", sphere: "personal" });
-    expect(data.tickets["testco/TST-4"].label).toBe("add-pending");
-    expect(syncs()).toBe(1);
     expect((modal as unknown as { isOpen: boolean }).isOpen).toBe(false);
   });
 
@@ -106,8 +98,8 @@ describe("AddTicketModal", () => {
     expect(errorText(modal)).toBe("");
   });
 
-  it("shows an unknown workspace inline and saves nothing", async () => {
-    const { modal, focus, data } = open();
+  it("shows an unknown workspace inline and adds nothing", async () => {
+    const { modal, focus } = open();
     row("Ticket link").texts[0].type("https://linear.app/elsewhere/issue/ELS-1");
     await click("Find ticket");
 
@@ -115,7 +107,6 @@ describe("AddTicketModal", () => {
       'The workspace "elsewhere" isn\'t set up. Set up: Testco (testco).'
     );
     expect(focus.items).toEqual([]);
-    expect(data.tickets).toEqual({});
   });
 
   it("refuses empty wording inline and stays open", async () => {

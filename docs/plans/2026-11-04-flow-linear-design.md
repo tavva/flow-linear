@@ -3,33 +3,34 @@
 ## Overview
 
 Flow Linear is an Obsidian plugin that puts chosen Linear tickets into Flow's
-Focus list and keeps them in step with a Linear label. Nothing comes in from
-Linear unless you ask for it, in one of two ways:
+Focus list and completes them there when they're done in Linear.
 
-1. Run "Add Linear ticket to Focus", paste a ticket URL, and keep the ticket's
-   title or write your own wording.
-2. Add the `flow-focus` label to a ticket in Linear. Flow Linear picks it up on its
-   next check.
+1. Run "Add Linear ticket to Focus", paste a ticket URL, keep the ticket's
+   title or write your own wording, and pick a sphere.
+2. Every few minutes the plugin reads the state of the tickets behind
+   unfinished Focus items, and completes the items of tickets that are done,
+   cancelled or deleted.
 
-The label then works both ways. It sits on a ticket exactly while at least one
-unfinished Focus item links to that ticket.
+Flow Linear only reads from Linear. It doesn't use a Linear label or change
+anything in Linear. (An earlier version of this design kept a shared
+workspace label in step with Focus; it was dropped because one workspace
+label collides between people and between vaults.)
 
 Flow knows nothing about Linear. Flow Linear works only through Flow's Focus
 API, designed in Flow's `docs/plans/2026-11-04-focus-api-design.md`. Names
 here match that design.
 
-Out of scope: Linear tickets anywhere in Flow other than Focus, creating or
-editing tickets, closing tickets from Flow, sources other than Linear.
+Out of scope: Linear tickets anywhere in Flow other than Focus, adding
+tickets from Linear's side (see "For later"), creating or editing tickets,
+closing tickets from Flow, sources other than Linear.
 
 ## Terms
 
 - **Workspace**: a Linear workspace (Linear calls it an organisation), with
   its own API key. Ben uses several.
-- **Ticket key**: `<workspace urlKey>/<identifier>`, for example
-  `acme/ABC-123`. Identifiers are unique only within a workspace, so the
-  key includes the workspace.
 - **Linked item**: an external Focus item with `sourceName: "linear"` whose
-  `url` points at the ticket.
+  `url` points at a ticket. The URL carries the workspace's `urlKey` and the
+  ticket's identifier, so the Focus item is the only record of the link.
 - **Unfinished**: a linked item without `completedAt`.
 
 ## Settings
@@ -39,11 +40,13 @@ The settings tab is declarative (`getSettingDefinitions()`, Obsidian 1.13), so
 
 - **Old Flow warning**: a row at the top, shown until dismissed, saying that
   Flow 1.3.12 or earlier on any device that syncs the vault will delete the
-  Linear items from Focus, and that Flow Linear will then take their labels
-  off. The README says the same in its setup section.
+  Linear items from Focus, and that the deletion syncs to every device. The
+  README says the same in its setup section.
 - **Workspaces**: a `type: 'list'` setting. Adding one opens a form modal:
   - _API key_: a `SecretComponent`. Settings store the secret's name, never
-    its value (see "Secrets" below).
+    its value (see "Secrets" below). The README asks for a key with Read
+    permission only, which Linear's personal API keys allow (optionally
+    limited to chosen teams).
   - On save the plugin queries `viewer { organization { name urlKey } }` with
     the key. That checks the key works and fills in the workspace's `urlKey`,
     so you never type the slug.
@@ -51,19 +54,15 @@ The settings tab is declarative (`getSettingDefinitions()`, Obsidian 1.13), so
     item's `sourceLabel` (the chip in Focus and the heading on the TV board).
   - _Default sphere_: a dropdown of Flow's spheres (`getSpheres()`).
   - Each row shows its display name and `urlKey`; rows can be deleted.
-- **Label name**: one text setting for all workspaces, default `flow-focus`.
-  It applies when the field loses focus or Enter is pressed, never per
-  keystroke. Renaming is described under "Renaming the label".
 - **Check every**: minutes between checks, default 5, minimum 1.
 - **Status**: a read-only row per workspace with the last successful check
   time or the last error.
 
-Stored settings:
+Stored in `data.json`:
 
 ```typescript
 interface FlowLinearSettings {
   workspaces: WorkspaceSettings[];
-  labelName: string; // Default "flow-focus"
   checkIntervalMinutes: number; // Default 5
   oldFlowWarningDismissed: boolean;
 }
@@ -76,6 +75,9 @@ interface WorkspaceSettings {
 }
 ```
 
+Nothing else is stored. When `data.json` changes on disk (another device's
+settings arriving through sync), the plugin reloads it.
+
 ## Adding a ticket from a URL
 
 Command: "Add Linear ticket to Focus" (id `add-ticket-to-focus`, no default
@@ -85,220 +87,65 @@ hotkey).
    `https://linear.app/<urlKey>/issue/<IDENTIFIER>[/<title-slug>]`, with or
    without query string or fragment.
 2. `urlKey` picks the workspace. If none matches, the modal says which
-   workspaces are set up and saves nothing.
+   workspaces are set up and adds nothing.
 3. The plugin fetches the ticket with `issue(id: "<IDENTIFIER>")`. Linear
    accepts the identifier there, including one the ticket had before it moved
    team. A "not found" answer means there's no such ticket.
 4. The modal shows the title in an editable wording field and the sphere
    (default from the workspace) in a dropdown. Add saves; Escape cancels.
 5. If the ticket's state type is `completed` or `canceled`, the modal says so
-   and saves nothing.
+   and adds nothing.
 6. On Add: `api.addFocusItem({ text, sphere, sourceName: "linear",
-sourceLabel: displayName, url: canonicalUrl, externalId: identifier })`,
-   then the ticket's record becomes `add-pending`, even if it was `synced`:
-   the label may have been removed in Linear since the last check, and the
-   next check must add it back rather than remove the item just added. The
-   device notes that it has seen the ticket with an unfinished item, and a
-   sync is requested.
+sourceLabel: displayName, url: canonicalUrl, externalId: identifier })`.
 
 Pasting a ticket that already has linked items adds another step for it. It
 doesn't replace the existing ones.
 
-## What the plugin stores
-
-The link from a Focus item to its ticket lives on the Focus item itself: the
-`url` carries the workspace and identifier, and `externalId` is the
-identifier. Flow Linear parses the URL to get the ticket key. The Focus file
-syncs between devices, so every device sees the same links without the plugin
-keeping its own copy.
-
-The plugin's own data (`data.json`) holds what Focus can't:
-
-```typescript
-interface FlowLinearData {
-  settings: FlowLinearSettings;
-  tickets: Record<string, TicketRecord>; // Keyed by ticket key
-}
-
-interface TicketRecord {
-  issueId: string; // Linear UUID, needed by the label mutations
-  label: "synced" | "add-pending" | "remove-pending";
-  labelName?: string; // Set by a rename: the old label still to come off
-}
-```
-
-`label` is the agreed `labelSynced` idea with the direction made explicit:
-
-- `synced`: Flow Linear has seen the label on the ticket in Linear.
-- `add-pending`: there are unfinished linked items and the label still needs
-  adding.
-- `remove-pending`: the label is being removed. It's set just before the
-  removal call, not after it succeeds, so a failed removal is retried at once
-  rather than waiting for confirmation again. The record is deleted once the
-  removal succeeds; until then the next check sees the label without
-  importing the ticket again.
-
-A ticket with no record is one Flow Linear doesn't track. When `data.json`
-changes on disk (another device's records arriving through sync), the plugin
-reloads it.
-
-Each device also keeps, in Obsidian's local storage for the vault
-(`app.saveLocalStorage`, not synced), the ticket keys it has itself seen with
-an unfinished linked item. See rule 5.
-
-## Label sync
+## Completing items
 
 ### When it runs
 
-- 30 seconds after Flow's API becomes available (see "Finding Flow"). The
-  wait gives the vault's sync time to bring in other devices' changes, so a
-  device waking with an old focus file doesn't act on it straight away.
-  Nothing syncs before then.
+- 30 seconds after Flow's API becomes available (see "Finding Flow"), to give
+  the vault's sync time to bring in other devices' changes. Nothing runs
+  before then.
 - Every `checkIntervalMinutes`, via `registerInterval(window.setInterval(…))`.
-- On a Focus change event for `sourceName: "linear"`, debounced by two
-  seconds, so completing or removing an item reaches Linear quickly.
-- After "Add Linear ticket to Focus".
-- 30 seconds after a pass that is waiting to confirm a change (see
-  "Confirmation"). Only one such follow-up is scheduled at a time.
+- After a workspace is added, and after settings reload from disk.
 
-Only one sync runs at a time. A request made during a run, including one made
-as the run finishes, queues a single follow-up run. When settings change in a
-way that makes records stale (a label rename, deleting a workspace, `data.json`
-reloaded), a pass already running stops before writing a record and runs
-again.
+Only one check runs at a time. A request made during a check, including one
+made as the check finishes, queues a single follow-up.
 
-### What it fetches
+### What it does
 
-Per workspace (`POST https://api.linear.app/graphql`, `Authorization: <api
-key>`, each request given up after 30 seconds):
+Per workspace with a key on this device:
 
-- the label's id: a workspace-level label (`team: null`) named `labelName`,
-  looked up once per session;
-- tickets with the label, filtered by that id (`labels: { id: { eq } }`), so
-  a team label of the same name never counts;
-- tickets by UUID for every tracked record in that workspace. These are
-  fetched even when their label has gone, which a filter on the label alone
-  would miss;
-- each linked item's ticket that has no record, with `issue(id:
-  identifier)`, which also resolves identifiers from before a team move.
+1. Read the Focus items with `getFocusItems("linear")` and keep the
+   unfinished ones whose URL names this workspace, grouped by identifier.
+2. If there are none, ask Linear nothing.
+3. Fetch the tickets' states, 50 at a time, with `issues(filter: { or: [{
+   team: { key }, number }] }, includeArchived: true)`. An identifier that
+   doesn't come back that way (the ticket may have moved team) is looked up
+   on its own with `issue(id:)`.
+4. For each ticket whose state type is `completed` or `canceled`, or which is
+   trashed or not found, call `completeFocusItem` on each of its unfinished
+   items. A deleted ticket is logged with `console.warn`.
 
-Each ticket reports only the plugin's own labels
-(`labels(filter: { id: { in: $labelIds } })`): the current label and any
-label being retired after a rename.
+A pure function, `findItemsToComplete(itemsByIdentifier, tickets)`, decides
+which items to complete; the `CompletionChecker` does the reading and
+writing.
 
-If the workspace has no label of that name, the first sync that needs one
-creates it with `issueLabelCreate` (no `teamId`). See "Failure handling" for
-when it refuses to.
+Completing is idempotent (`completeFocusItem` keeps the first completion
+time), so the check needs no stored state, no confirmation and no
+coordination between devices or vaults. Flow reports the plugin's own writes
+back as change events; the plugin doesn't listen to them.
 
-### Deciding what to do
+An item whose completion fails because it has already gone or been completed
+counts as done. Other failures are reported after the remaining items have
+been tried.
 
-A pure function makes every decision:
-
-```typescript
-function decideSyncActions(input: {
-  workspace: WorkspaceSettings;
-  labelName: string;
-  labelId: string | null; // Null if the workspace has no such label yet
-  retiredLabelIds: Map<string, string | null>; // Old label names after a rename
-  labelledTickets: LinearTicket[]; // Currently carry the label
-  trackedTickets: LinearTicket[]; // State of every tracked ticket
-  lookedUpAs: Map<string, string>; // Ticket id → the key it was looked up by
-  records: Record<string, TicketRecord>; // This workspace's records
-  focusItems: ExternalFocusItem[]; // sourceName "linear", this workspace
-  confirmed: Set<string>; // Changes a later pass has confirmed
-  seenUnfinished: Set<string>; // Ticket keys this device saw unfinished
-}): SyncAction[];
-
-type SyncAction =
-  | { type: "import"; ticketKey: string; ticket: LinearTicket }
-  | { type: "removeItems"; ticketKey: string; itemIds: string[] } // And delete record
-  | { type: "completeItems"; ticketKey: string; itemIds: string[] }
-  | { type: "addLabel"; ticketKey: string; issueId: string }
-  | { type: "removeLabel"; ticketKey: string; issueId: string }
-  | { type: "retireLabel"; ticketKey: string; issueId: string; labelId: string | null; next: TicketRecord | null }
-  | { type: "await"; change: "import" | "addLabel" | "removeLabel" | "removeItems"; ticketKey: string }
-  | { type: "setRecord"; ticketKey: string; record: TicketRecord | null };
-```
-
-Before the rules, records are tidied: if two records share a UUID (a ticket
-whose identifier changed gained a second record), the first key in order is
-kept and the other deleted, and items linked by either identifier count
-towards it. A linked item whose ticket Linear didn't return, and which has no
-record, is left alone: it may be in a team the key can't see. Only a record
-whose UUID comes back missing counts as deleted.
-
-For each ticket, in this order:
-
-0. **Label renamed.** The record names an old label → `retireLabel`: take the
-   old label off if the ticket has it, then the record becomes `add-pending`
-   (or is deleted if it was `remove-pending`). The rules below then put the
-   new label on tickets with unfinished items.
-1. **Closed or deleted in Linear.** State type `completed` or `canceled`, or
-   trashed or missing → complete every unfinished linked item, then
-   `removeLabel` (or delete the record if the label's gone). Linear is the
-   authority here, so there's no confirmation.
-2. **Label added in Linear.** Labelled, no record, no unfinished linked item →
-   import, once confirmed: `addFocusItem` with the ticket title as wording,
-   the workspace's default sphere, and record `synced`.
-3. **Label removed in Linear.** Record `synced`, ticket no longer labelled →
-   with no unfinished items, delete the record; otherwise, once confirmed,
-   remove every unfinished linked item and delete the record. Completed
-   linked items stay, so "done today" isn't lost.
-4. **Label to add.** Unfinished linked items, ticket not labelled → with a
-   record (`add-pending` or `remove-pending`), `addLabel` at once; with no
-   record (the item came from another device), `addLabel` once confirmed. On
-   success the record becomes `synced`.
-5. **Label to remove.** No unfinished linked items, record exists → if the
-   label is already gone, delete the record. If `remove-pending`, retry
-   `removeLabel`. Otherwise, only if this device has itself seen the ticket
-   with an unfinished item, `removeLabel` once confirmed. A device that never
-   saw the items leaves the label alone: its focus file may simply be behind
-   the device that added them.
-6. **Label present and wanted.** Labelled with unfinished linked items →
-   record `synced`.
-
-Rule 3 is the only one that tells "removed in Linear" apart from "not yet
-added". It does so because `synced` means the plugin has seen the label
-there.
-
-A labelled ticket that has only completed linked items is imported again (rule
-2), because it has no unfinished item. Adding the label in Linear always means
-"put this in Focus".
-
-### Confirmation
-
-Changes that rest on what this device's focus file shows (import, adding the
-label for an item from another device, removing the label, removing items
-after the label went in Linear) aren't made on the pass that first calls for
-them. The pass records an `await`, and the change is made only if a pass at
-least 30 seconds later still calls for it. A pass that doesn't call for it, or
-that fails to read Linear, forgets the earlier sighting. This covers sync
-glitches that briefly empty the focus file and devices whose files are still
-catching up. It doesn't help against Flow 1.3.12 and earlier, which delete
-external items for good.
-
-### Carrying out actions
-
-- Focus writes go through the API: `addFocusItem`, `completeFocusItem`,
-  `removeFocusItem`. Each call holds Flow's focus file lock. Before removing
-  items, the pass re-reads Focus and keeps any completed since.
-- Label changes use `issueAddLabel(id, labelId)` and
-  `issueRemoveLabel(id, labelId)`, which touch only that one label and leave
-  the ticket's other labels alone (unlike `issueUpdate(labelIds)`).
-- Records are saved after each action succeeds (except `remove-pending`,
-  above). A failed action leaves its record unchanged, so the next run tries
-  again. A failed action doesn't stop the others, unless Linear can't be
-  reached or refused the key, which ends that workspace's pass.
-- Nothing is saved after the plugin unloads.
-- The plugin's own API calls trigger Focus change events. Those request a
-  sync, which then finds nothing to do.
-
-### Renaming the label
-
-The tracked tickets carry the old label. On rename, every record without a
-`labelName` gets the old name, and rule 0 takes the old label off and then the
-new one goes on tickets with unfinished items. A pending removal of the old
-label still happens. The old label itself stays in Linear for you to delete.
+A ticket the key can't see (for example in a team the key isn't limited to)
+also comes back as not found, so its items would be completed. Items are only
+added through the command with the same key, so this only happens if the
+key's access changes.
 
 ## Finding Flow
 
@@ -308,16 +155,14 @@ As set out in the Focus API design:
   `app.plugins` isn't in Obsidian's public typings, so `src/flow-api.ts`
   declares the narrow type used, with a copy of Flow's `FlowApi` interface.
 - If Flow is enabled but has no `api` with an `apiVersion` (Flow 1.3.12 and
-  earlier), show a notice that stays until clicked and don't sync. This only
+  earlier), show a notice that stays until clicked and don't run. This only
   protects this device, so the settings warning is still needed.
 - Listen for `flow:api-ready` and `flow:api-unloaded` workspace events to cope
   with Flow being enabled, disabled or reloaded later. After unload Flow's API
-  refuses writes, so the plugin drops it and finds it again on ready. A pass
+  refuses writes, so the plugin drops it and finds it again on ready. A check
   interrupted by the unload ends quietly.
 - If `apiVersion` isn't `1`, show one notice and stay idle.
-- Without Flow, the command shows "Flow isn't enabled", and sync doesn't run.
-- `onFocusChange("linear", …)` returns an unsubscribe function, called on
-  `onunload` and on `flow:api-unloaded`.
+- Without Flow, the command shows "Flow isn't enabled", and checks don't run.
 
 ## Failure handling
 
@@ -325,7 +170,7 @@ As set out in the Focus API design:
   `throw: false`, and give up after 30 seconds. A failed workspace check is
   skipped for that run; others continue. One notice per workspace and kind of
   problem per session ("Couldn't reach Linear for Acme"); details go in
-  the settings status row. Pending records stay pending.
+  the settings status row.
 - **Errors Linear reports** (a GraphQL `errors` array): the notice shows
   Linear's message.
 - **Bad key** (HTTP 401, or a GraphQL authentication error). A notice that
@@ -334,25 +179,28 @@ As set out in the Focus API design:
   workspace until the next interval. At one or two queries per workspace
   every five minutes, this shouldn't happen.
 - **Missing secret.** A workspace whose secret name has no value on this
-  device (secrets are stored per device, see below) is skipped without a
-  notice. Its status row says "No API key on this device".
-- **Label missing or a team label.** If the workspace has no workspace-level
-  label of that name and a team label has it, the workspace is paused with a
-  notice saying so: the plugin can't make a workspace label. If the label is
-  missing while records expect it (renamed or deleted in Linear), the
-  workspace is paused rather than read as every label removed.
+  device (secrets are stored per device) is skipped without a notice. Its
+  status row says "No API key on this device".
 - **Unparseable URL or unknown workspace** in the add modal: an inline error,
-  nothing saved.
-- **Ticket deleted in Linear** (a tracked UUID comes back missing or trashed):
-  handled as closed. Linked items are completed and the record deleted.
-- **Several devices.** Records sync through `data.json` when the vault's sync
-  includes plugin settings. Confirmation, the startup wait and rule 5's
-  "seen on this device" check stop a device with old files from removing
-  labels or importing duplicates. Two devices can still both import a newly
-  labelled ticket if their files don't sync within the 30-second wait; the
-  duplicate shows up as two Focus items for one ticket, and you can remove
-  one. Because keys are stored per device, only devices where you've entered
-  a key take part.
+  nothing added.
+- **Several devices or vaults.** Each device with a key checks on its own.
+  Completing twice is harmless.
+
+## For later
+
+Not built now.
+
+- **Adding from Linear.** An `obsidian://flow-linear?url=…` URI handler
+  (`registerObsidianProtocolHandler`) that opens the add modal with the URL
+  filled in, so a browser bookmarklet on a Linear ticket page could send it to
+  Obsidian. This replaces adding via a shared label.
+- **Assigned tickets view.** A Flow Linear view listing the tickets assigned
+  to each key's user in chosen states (for example Todo), across the
+  configured workspaces, to pick from. Each pick goes through the same "keep
+  the title or write your own" step as pasting a link. It's read-only and per
+  person, and needs no change to Flow's API. Open points: which states to
+  show (configurable per workspace, since state names vary by team), and
+  marking tickets that are already in Focus.
 
 ## Guidelines compliance
 
@@ -401,12 +249,12 @@ the [obsidianmd ESLint plugin](https://github.com/obsidianmd/eslint-plugin)
 
 | Rule                                                                                            | How Flow Linear meets it                                                                                                                            |
 | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Disclose network use in the README, naming the services and why                                 | README "Network use" section: only `api.linear.app`, with your own API keys, to read labelled and tracked tickets and add or remove one label       |
+| Disclose network use in the README, naming the services and why | README "Network use" section: only `api.linear.app`, with your own read-only API keys, to read the tickets you add and the states of tickets in Focus |
 | Disclose any account required                                                                   | README says a Linear account, and Flow, are required                                                                                                |
 | No client-side telemetry, no ads, no self-updating, no obfuscation                              | None; plain esbuild output, minified only as Flow does                                                                                              |
 | LICENSE file that GitHub recognises                                                             | Same licence text as Flow (GPL-3.0-or-later, full text) so GitHub's licence check passes                                                            |
 | Respect Obsidian's trademark; plugin id can't contain `obsidian`                                | id `flow-linear`, name "Flow Linear"                                                                                                                |
-| `manifest.json` description: action statement, ≤250 characters, ends with a full stop, no emoji | "Add Linear tickets to Flow's Focus list and keep them in step with a Linear label."                                                                |
+| `manifest.json` description: action statement, ≤250 characters, ends with a full stop, no emoji | "Add Linear tickets to Flow's Focus list and complete them when they're done in Linear." |
 | Appropriate `minAppVersion`                                                                     | `1.13.0` (declarative settings; SecretStorage needs 1.11.4)                                                                                         |
 | Node.js/Electron APIs only with `isDesktopOnly`                                                 | None used, but `isDesktopOnly: true` for now (Ben's decision 2): keys aren't yet entered on phones                                                 |
 | No `fundingUrl` unless taking donations                                                         | Omitted                                                                                                                                             |
@@ -414,12 +262,12 @@ the [obsidianmd ESLint plugin](https://github.com/obsidianmd/eslint-plugin)
 | Remove sample code and placeholder names                                                        | Not started from the sample plugin; `no-sample-code` and `sample-names` lint rules check it                                                         |
 | Use `requestUrl`, not `fetch`                                                                   | All Linear calls go through one `requestUrl` wrapper; also avoids CORS                                                                              |
 | No `innerHTML`/`outerHTML`/`insertAdjacentHTML`                                                 | Modal and settings built with `createEl`/`setText`; ticket titles are always plain text                                                             |
-| Clean up on unload                                                                              | `registerInterval`, `registerEvent`, Flow change-callback unsubscribed in `onunload`                                                                |
+| Clean up on unload | `registerInterval`, `registerEvent`, startup timer cleared and checker stopped in `onunload` |
 | Window-aware timers and documents (popout windows)                                              | `window.setInterval`/`activeWindow.setTimeout` per `prefer-window-timers`; `activeDocument` where needed                                            |
 | Avoid the global `app`                                                                          | Use `this.app` throughout                                                                                                                           |
 | Sentence case UI; no "settings" in headings; `setHeading` not `<h2>`                            | Declarative groups provide headings; `obsidianmd/ui/sentence-case` with `Linear` and `Flow` added as brands                                         |
 | No hardcoded styles                                                                             | Classes in `styles.css`, prefixed `flow-linear-`; no `element.style`                                                                                |
-| Avoid needless console logging                                                                  | Errors only, via `console.error`, no routine logging                                                                                                |
+| Avoid needless console logging | Errors via `console.error`, and one `console.warn` when a deleted ticket's item is completed; no routine logging |
 | Handle promises                                                                                 | `no-misused-promises` and `no-floating-promises`; fire-and-forget calls use `void` with `.catch` that records the status                            |
 | Store API keys in SecretStorage                                                                 | `SecretComponent` in the workspace form; settings store only the secret name                                                                        |
 | Declarative settings tab                                                                        | `getSettingDefinitions()` with a `list` for workspaces and `render` for the `SecretComponent` row; no `display()`                                   |
@@ -453,33 +301,30 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
 
 ## Testing
 
-- **`decideSyncActions`**: table-driven tests for each rule. Import, Linear
-  removal with `synced`, pending add (including a missing record, as when the
-  item was added on another device), pending remove, closed ticket, deleted
-  ticket, a relabelled ticket with only completed items, several items for
-  one ticket with one removed (label stays), two workspaces with the same
-  identifier.
+- **`findItemsToComplete`**: completed and cancelled tickets complete their
+  items; open states don't; deleted and trashed tickets count as done; items
+  whose ticket wasn't looked up are left. Grouping keeps only the workspace's
+  unfinished linked items.
 - **URL parsing**: valid forms (with and without slug, query, fragment) and
   rejects (other hosts, project or team URLs, missing identifier).
-- **Linear client**: recorded GraphQL responses stored as JSON in
-  `tests/fixtures/`, served through the `requestUrl` mock. Covers pagination,
-  null tickets, 401, 429, a GraphQL `errors` array, and label lookup and
-  creation. The tests check the client's parsing and error mapping, not the
-  mock.
-- **Sync runner**: carries out decided actions against an in-memory Focus
-  store that implements `FlowApi`. Checks that records change only after an
-  action succeeds, that one run happens at a time with a single queued
-  follow-up, and that its own change events lead to no further actions.
-- **Settings and modal**: the add modal's handling of an unknown workspace,
-  a closed ticket and empty wording; the label name applying only on commit.
-- **Several devices**: two runners sharing one in-memory Linear workspace, each
-  with its own focus file, `data.json` copy and local storage, with file sync
-  done by hand in the test. Covers a device whose focus file is behind not
-  removing the label (or so the other device's items), and a device starting
-  before another's import arrives not importing a duplicate.
+- **Linear client**: GraphQL responses stored as JSON in `tests/fixtures/`,
+  served through the `requestUrl` mock. Covers batching, pagination, the
+  one-by-one lookup for moved and missing tickets, "Entity not found", 401,
+  429, a GraphQL `errors` array, the 30-second timeout, and that no request
+  is a mutation. The tests check the client's parsing and error mapping, not
+  the mock.
+- **Completion checker**: runs against an in-memory Focus store that
+  implements `FlowApi` and an in-memory Linear workspace. Covers completing
+  and leaving items, deleted tickets, repeat checks doing nothing, items that
+  have already gone, failed writes, workspaces with the same identifier, each
+  failure kind and its notice, Flow unloading mid-check, stopping, and one
+  check at a time with a single queued follow-up.
+- **Settings and modals**: the add modal's handling of an unknown workspace,
+  a closed ticket and empty wording; the workspace form; the old Flow
+  warning.
 - **Manual check in Obsidian** before the first release: in a Linear test
-  team, add and remove the label in Linear and in Flow, close a ticket, go
-  offline and come back, and run on two devices.
+  team, add tickets by link, complete and cancel them in Linear, delete one,
+  go offline and come back.
 
 Fixtures are to be recorded once by hand from a real workspace, with names and
 URLs replaced by test values. The first set was written by hand in Linear's
@@ -488,12 +333,13 @@ with recorded ones during the manual check.
 
 ## Decisions (Ben, 2026-11-04)
 
-1. **Whose labelled tickets:** import any ticket carrying the label, as
-   designed. The default label is `flow-focus`
-   rather than `focus`, so it doesn't collide with a team's own `focus`
-   label.
+1. **Whose labelled tickets:** superseded by decision 5.
 2. **Mobile:** desktop only for now. Keys stay per device in SecretStorage;
    entering them on a phone is left for later.
 3. **Licence:** GPL-3.0-or-later, as Flow.
 4. **Distribution:** submit to the Community directory, so the first release
    must pass the automated scan and ship with artifact attestations.
+5. **No Linear label.** A shared workspace label collides between people and
+   between vaults, so adding from Linear via a label is dropped. Flow Linear
+   adds tickets only by link, completes Focus items when tickets close, and
+   only reads from Linear, with a read-only key.

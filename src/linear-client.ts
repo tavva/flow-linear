@@ -1,19 +1,20 @@
-// ABOUTME: Talks to Linear's GraphQL API through Obsidian's requestUrl, one client per API key.
-// ABOUTME: Maps HTTP and GraphQL failures onto a small set of error kinds the sync can act on.
+// ABOUTME: Reads from Linear's GraphQL API through Obsidian's requestUrl, one client per API key.
+// ABOUTME: Read-only; maps HTTP and GraphQL failures onto a few error kinds the plugin can act on.
 
 import { requestUrl } from "obsidian";
+import { splitIdentifier } from "./ticket-url";
 
 export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 export const REQUEST_TIMEOUT_MS = 30_000;
-const PAGE_SIZE = 100;
+// Tickets asked for in one query when checking states
+export const BATCH_SIZE = 50;
 
 export interface LinearTicket {
   id: string; // UUID
   identifier: string; // e.g. "ABC-123"
   url: string;
   title: string;
-  stateType: string;
-  labelIds: string[]; // Only the labels the caller asked about, not all the ticket's labels
+  stateType: string; // "triage", "backlog", "unstarted", "started", "completed" or "canceled"
   trashed: boolean;
 }
 
@@ -34,26 +35,16 @@ export class LinearError extends Error {
   }
 }
 
-/**
- * What the sync and the add modal need from Linear for one workspace. Ticket lookups take the
- * label ids to report on each ticket (`labelIds`), so only the plugin's own labels are read.
- */
+/** What the plugin needs from Linear for one workspace. Nothing here changes Linear. */
 export interface LinearWorkspaceClient {
   getOrganization(): Promise<LinearOrganization>;
   // Accepts an identifier the ticket had before it moved team; null if there's no such ticket
-  getTicketByIdentifier(identifier: string, labelIds: string[]): Promise<LinearTicket | null>;
-  getLabelledTickets(labelId: string, labelIds: string[]): Promise<LinearTicket[]>;
-  getTicketsByIds(ids: string[], labelIds: string[]): Promise<LinearTicket[]>;
-  findWorkspaceLabel(labelName: string): Promise<string | null>;
-  hasTeamLabel(labelName: string): Promise<boolean>;
-  createWorkspaceLabel(labelName: string): Promise<string>;
-  addLabel(issueId: string, labelId: string): Promise<void>;
-  removeLabel(issueId: string, labelId: string): Promise<void>;
+  getTicketByIdentifier(identifier: string): Promise<LinearTicket | null>;
+  // Each identifier asked for → its ticket, or null if Linear has no such ticket
+  getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>>;
 }
 
-// Needs a `$labelIds: [ID!]` variable in the query
-const TICKET_FIELDS = `id identifier url title trashed state { type }
-  labels(filter: { id: { in: $labelIds } }) { nodes { id } }`;
+const TICKET_FIELDS = `id identifier url title trashed state { type }`;
 
 interface TicketNode {
   id: string;
@@ -62,7 +53,6 @@ interface TicketNode {
   title: string;
   trashed?: boolean | null;
   state?: { type: string } | null;
-  labels?: { nodes: { id: string }[] } | null;
 }
 
 interface IssuePage {
@@ -77,12 +67,6 @@ interface GraphqlError {
   extensions?: { code?: string; type?: string; userPresentableMessage?: string };
 }
 
-function isNotFound(error: unknown): boolean {
-  return (
-    error instanceof LinearError && error.kind === "api" && /entity not found/i.test(error.message)
-  );
-}
-
 function toTicket(node: TicketNode): LinearTicket {
   return {
     id: node.id,
@@ -90,9 +74,14 @@ function toTicket(node: TicketNode): LinearTicket {
     url: node.url,
     title: node.title,
     stateType: node.state?.type ?? "",
-    labelIds: node.labels?.nodes.map((label) => label.id) ?? [],
     trashed: node.trashed === true,
   };
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    error instanceof LinearError && error.kind === "api" && /entity not found/i.test(error.message)
+  );
 }
 
 function errorFromGraphql(errors: GraphqlError[]): LinearError {
@@ -132,14 +121,11 @@ export class LinearClient implements LinearWorkspaceClient {
     return data.viewer.organization;
   }
 
-  async getTicketByIdentifier(
-    identifier: string,
-    labelIds: string[]
-  ): Promise<LinearTicket | null> {
+  async getTicketByIdentifier(identifier: string): Promise<LinearTicket | null> {
     try {
       const data = await this.query<{ issue: TicketNode | null }>(
-        `query ($id: String!, $labelIds: [ID!]) { issue(id: $id) { ${TICKET_FIELDS} } }`,
-        { id: identifier, labelIds }
+        `query ($id: String!) { issue(id: $id) { ${TICKET_FIELDS} } }`,
+        { id: identifier }
       );
       return data.issue ? toTicket(data.issue) : null;
     } catch (error) {
@@ -148,92 +134,47 @@ export class LinearClient implements LinearWorkspaceClient {
     }
   }
 
-  // By id, so a team label that happens to share the name doesn't count
-  getLabelledTickets(labelId: string, labelIds: string[]): Promise<LinearTicket[]> {
-    return this.queryIssues({ labels: { id: { eq: labelId } } }, labelIds);
-  }
-
-  getTicketsByIds(ids: string[], labelIds: string[]): Promise<LinearTicket[]> {
-    if (ids.length === 0) return Promise.resolve([]);
-    return this.queryIssues({ id: { in: ids } }, labelIds);
-  }
-
-  async findWorkspaceLabel(labelName: string): Promise<string | null> {
-    const data = await this.query<{ issueLabels: { nodes: { id: string }[] } }>(
-      `query ($name: String!) {
-        issueLabels(filter: { name: { eqIgnoreCase: $name }, team: { null: true } }, first: 1) {
-          nodes { id }
-        }
-      }`,
-      { name: labelName }
-    );
-    return data.issueLabels.nodes[0]?.id ?? null;
-  }
-
-  async hasTeamLabel(labelName: string): Promise<boolean> {
-    const data = await this.query<{ issueLabels: { nodes: { id: string }[] } }>(
-      `query ($name: String!) {
-        issueLabels(filter: { name: { eqIgnoreCase: $name }, team: { null: false } }, first: 1) {
-          nodes { id }
-        }
-      }`,
-      { name: labelName }
-    );
-    return data.issueLabels.nodes.length > 0;
-  }
-
-  async createWorkspaceLabel(labelName: string): Promise<string> {
-    const data = await this.query<{
-      issueLabelCreate: { success: boolean; issueLabel: { id: string } | null };
-    }>(
-      `mutation ($name: String!) {
-        issueLabelCreate(input: { name: $name }) { success issueLabel { id } }
-      }`,
-      { name: labelName }
-    );
-    const label = data.issueLabelCreate.issueLabel;
-    if (!data.issueLabelCreate.success || !label) {
-      throw new LinearError("api", `Linear didn't create the label "${labelName}"`);
+  /**
+   * Looks tickets up by team key and number, BATCH_SIZE at a time. One that doesn't turn up
+   * that way (it may have moved team) is looked up on its own by identifier.
+   */
+  async getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>> {
+    const unique = [...new Set(identifiers)];
+    const found = new Map<string, LinearTicket>();
+    for (let start = 0; start < unique.length; start += BATCH_SIZE) {
+      const conditions = unique.slice(start, start + BATCH_SIZE).flatMap((identifier) => {
+        const parts = splitIdentifier(identifier);
+        return parts
+          ? [{ team: { key: { eq: parts.teamKey } }, number: { eq: parts.number } }]
+          : [];
+      });
+      if (conditions.length === 0) continue;
+      for (const ticket of await this.queryIssues({ or: conditions })) {
+        found.set(ticket.identifier, ticket);
+      }
     }
-    return label.id;
-  }
-
-  async addLabel(issueId: string, labelId: string): Promise<void> {
-    const data = await this.query<{ issueAddLabel: { success: boolean } }>(
-      `mutation ($id: String!, $labelId: String!) {
-        issueAddLabel(id: $id, labelId: $labelId) { success }
-      }`,
-      { id: issueId, labelId }
-    );
-    if (!data.issueAddLabel.success) {
-      throw new LinearError("api", "Linear didn't add the label");
+    const results = new Map<string, LinearTicket | null>();
+    for (const identifier of unique) {
+      results.set(
+        identifier,
+        found.get(identifier) ?? (await this.getTicketByIdentifier(identifier))
+      );
     }
+    return results;
   }
 
-  async removeLabel(issueId: string, labelId: string): Promise<void> {
-    const data = await this.query<{ issueRemoveLabel: { success: boolean } }>(
-      `mutation ($id: String!, $labelId: String!) {
-        issueRemoveLabel(id: $id, labelId: $labelId) { success }
-      }`,
-      { id: issueId, labelId }
-    );
-    if (!data.issueRemoveLabel.success) {
-      throw new LinearError("api", "Linear didn't remove the label");
-    }
-  }
-
-  private async queryIssues(filter: object, labelIds: string[]): Promise<LinearTicket[]> {
+  private async queryIssues(filter: object): Promise<LinearTicket[]> {
     const tickets: LinearTicket[] = [];
     let after: string | null = null;
     do {
       const data: IssuePage = await this.query<IssuePage>(
-        `query ($filter: IssueFilter, $after: String, $labelIds: [ID!]) {
-          issues(filter: $filter, first: ${PAGE_SIZE}, after: $after, includeArchived: true) {
+        `query ($filter: IssueFilter, $after: String) {
+          issues(filter: $filter, first: ${BATCH_SIZE}, after: $after, includeArchived: true) {
             nodes { ${TICKET_FIELDS} }
             pageInfo { hasNextPage endCursor }
           }
         }`,
-        { filter, after, labelIds }
+        { filter, after }
       );
       tickets.push(...data.issues.nodes.map(toTicket));
       after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;

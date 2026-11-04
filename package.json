@@ -1,7 +1,7 @@
 {
   "name": "flow-linear",
   "version": "0.1.0",
-  "description": "Add Linear tickets to Flow's Focus list and keep them in step with a Linear label.",
+  "description": "Add Linear tickets to Flow's Focus list and complete them when they're done in Linear.",
   "main": "main.js",
   "private": true,
   "scripts": {

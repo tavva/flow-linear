@@ -8,8 +8,7 @@
           "url": "https://linear.app/testco/issue/TST-2/fix-the-login-page",
           "title": "Fix the login page",
           "trashed": false,
-          "state": { "type": "unstarted" },
-          "labels": { "nodes": [{ "id": "label-uuid-1" }] }
+          "state": { "type": "unstarted" }
         }
       ],
       "pageInfo": { "hasNextPage": false, "endCursor": "cursor-2" }

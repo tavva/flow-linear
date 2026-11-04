@@ -1,34 +1,27 @@
 // ABOUTME: Tests the add-ticket steps: looking a URL up and adding the ticket to Focus.
-// ABOUTME: Covers unknown workspaces, closed tickets, empty wording and the records it writes.
+// ABOUTME: Covers unknown workspaces, closed tickets, empty wording and rejected writes.
 
 import { AddTicket, FoundTicket } from "../src/add-ticket";
 import { FlowApi } from "../src/flow-api";
-import { readStoredData } from "../src/settings";
-import { labelled, ticket, workspace } from "./helpers/builders";
+import { readSettings } from "../src/settings";
+import { ticket, workspace } from "./helpers/builders";
 import { FocusStore } from "./helpers/focus-store";
 import { LinearWorkspace } from "./helpers/linear-workspace";
 
 function setUp() {
   const focus = new FocusStore();
   const linear = new LinearWorkspace();
-  const data = readStoredData(null);
-  data.settings.workspaces = [workspace()];
+  const settings = readSettings(null);
+  settings.workspaces = [workspace()];
   const secrets = new Map([["linear-testco", "key"]]);
-  const state = { flow: focus as FlowApi | null, syncs: 0, saves: 0, seen: [] as string[] };
+  const state = { flow: focus as FlowApi | null };
   const addTicket = new AddTicket({
     getFlowApi: () => state.flow,
-    getData: () => data,
-    saveData: async () => {
-      state.saves++;
-    },
+    getSettings: () => settings,
     getSecret: (name) => secrets.get(name) ?? null,
     createClient: () => linear,
-    requestSync: () => {
-      state.syncs++;
-    },
-    markSeenUnfinished: (key) => state.seen.push(key),
   });
-  return { focus, linear, data, secrets, state, addTicket };
+  return { focus, linear, settings, secrets, state, addTicket };
 }
 
 async function found(addTicket: AddTicket, url: string): Promise<FoundTicket> {
@@ -43,7 +36,6 @@ describe("lookUp", () => {
     linear.tickets = [ticket("TST-4", { title: "Ship it" })];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4/ship-it?x=1");
     expect(result.ticket.title).toBe("Ship it");
-    expect(result.ticketKey).toBe("testco/TST-4");
     expect(result.workspace.urlKey).toBe("testco");
   });
 
@@ -64,8 +56,8 @@ describe("lookUp", () => {
   });
 
   it("points to settings when no workspaces are set up", async () => {
-    const { addTicket, data } = setUp();
-    data.settings.workspaces = [];
+    const { addTicket, settings } = setUp();
+    settings.workspaces = [];
     const result = await addTicket.lookUp("https://linear.app/testco/issue/TST-1");
     expect(result).toEqual({ ok: false, error: expect.stringContaining("Add one in Flow Linear") });
   });
@@ -113,8 +105,8 @@ describe("lookUp", () => {
 });
 
 describe("add", () => {
-  it("adds the item with the chosen wording and sphere, marks the label pending and syncs", async () => {
-    const { addTicket, linear, focus, data, state } = setUp();
+  it("adds the item with the chosen wording and sphere", async () => {
+    const { addTicket, linear, focus } = setUp();
     linear.tickets = [ticket("TST-4")];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
 
@@ -131,51 +123,21 @@ describe("add", () => {
         externalId: "TST-4",
       },
     });
-    expect(data.tickets["testco/TST-4"]).toEqual({
-      issueId: "uuid-testco-TST-4",
-      label: "add-pending",
-    });
-    expect(state.syncs).toBe(1);
   });
 
-  it("adds another step for a ticket already in Focus and marks even a synced label pending", async () => {
-    const { addTicket, linear, focus, data, state } = setUp();
-    linear.tickets = [labelled("TST-4")];
-    data.tickets["testco/TST-4"] = { issueId: "uuid-testco-TST-4", label: "synced" };
+  it("adds another step for a ticket already in Focus", async () => {
+    const { addTicket, linear, focus } = setUp();
+    linear.tickets = [ticket("TST-4")];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
 
     await addTicket.add(result, "Step one", "work");
     await addTicket.add(result, "Step two", "work");
 
     expect(focus.items.map((i) => i.text)).toEqual(["Step one", "Step two"]);
-    // The label may have come off in Linear since the last pass; pending makes the next pass
-    // put it back rather than remove the new item
-    expect(data.tickets["testco/TST-4"]).toEqual({
-      issueId: "uuid-testco-TST-4",
-      label: "add-pending",
-    });
-    expect(state.seen).toEqual(["testco/TST-4", "testco/TST-4"]);
   });
 
-  it("keeps a renamed-away label on the record so it still comes off", async () => {
-    const { addTicket, linear, data } = setUp();
-    linear.tickets = [labelled("TST-4")];
-    data.tickets["testco/TST-4"] = {
-      issueId: "uuid-testco-TST-4",
-      label: "synced",
-      labelName: "old-focus",
-    };
-    const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
-    await addTicket.add(result, "Step", "work");
-    expect(data.tickets["testco/TST-4"]).toEqual({
-      issueId: "uuid-testco-TST-4",
-      label: "add-pending",
-      labelName: "old-focus",
-    });
-  });
-
-  it("refuses empty wording or sphere and saves nothing", async () => {
-    const { addTicket, linear, focus, data } = setUp();
+  it("refuses empty wording or sphere and adds nothing", async () => {
+    const { addTicket, linear, focus } = setUp();
     linear.tickets = [ticket("TST-4")];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
 
@@ -184,7 +146,6 @@ describe("add", () => {
     );
     expect(await addTicket.add(result, "Wording", "")).toBe("Choose a sphere.");
     expect(focus.items).toEqual([]);
-    expect(data.tickets).toEqual({});
   });
 
   it("refuses when Flow has gone", async () => {
@@ -195,8 +156,8 @@ describe("add", () => {
     expect(await addTicket.add(result, "Wording", "work")).toBe("Flow isn't enabled");
   });
 
-  it("reports a Focus write that Flow rejects and records nothing", async () => {
-    const { addTicket, linear, focus, data, state } = setUp();
+  it("reports a Focus write that Flow rejects", async () => {
+    const { addTicket, linear, focus } = setUp();
     linear.tickets = [ticket("TST-4", { url: "linear://not-a-web-link" })];
     const result = await found(addTicket, "https://linear.app/testco/issue/TST-4");
 
@@ -204,7 +165,5 @@ describe("add", () => {
       "Couldn't add the ticket to Focus: Focus item url must be an http or https link"
     );
     expect(focus.items).toEqual([]);
-    expect(data.tickets).toEqual({});
-    expect(state.syncs).toBe(0);
   });
 });

@@ -8,8 +8,7 @@
           "url": "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
           "title": "Write the onboarding guide",
           "trashed": null,
-          "state": { "type": "started" },
-          "labels": { "nodes": [{ "id": "label-uuid-1" }, { "id": "label-uuid-bug" }] }
+          "state": { "type": "started" }
         }
       ],
       "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" }
