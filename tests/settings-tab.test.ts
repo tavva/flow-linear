@@ -70,20 +70,36 @@ describe("FlowLinearSettingTab", () => {
     unload(plugin);
   });
 
-  it("deletes a workspace from the current list, clears its key and saves", async () => {
+  it("deletes a workspace from the current list, clears the key it stored and saves", async () => {
     const { group, plugin, tab, secrets } = await setUp();
+    secrets.set("flow-linear-thirdco", "lin_api_third");
     const save = jest.spyOn(plugin, "saveSettings");
     const list = group("Workspaces");
     // Settings reloaded from another device after the tab was drawn
-    plugin.settings.workspaces = [workspace("testco"), workspace("thirdco")];
+    plugin.settings.workspaces = [
+      workspace("testco"),
+      workspace("thirdco", { apiKeySecretName: "flow-linear-thirdco" }),
+    ];
     list.onDelete?.(1);
     await new Promise((resolve) => setImmediate(resolve));
     expect(plugin.settings.workspaces.map((w) => w.urlKey)).toEqual(["testco"]);
     // SecretStorage can't delete, so the key is overwritten with an empty value
-    expect(secrets.get("linear-thirdco")).toBe("");
-    expect(plugin.getSecret("linear-thirdco")).toBe("");
+    expect(secrets.get("flow-linear-thirdco")).toBe("");
+    expect(plugin.getSecret("flow-linear-thirdco")).toBe("");
     expect(save).toHaveBeenCalled();
     expect((tab as unknown as { updates: number }).updates).toBe(1);
+    unload(plugin);
+  });
+
+  it("leaves alone a secret the plugin didn't name, which other plugins may share", async () => {
+    const { group, plugin, secrets } = await setUp();
+    // Set up with Obsidian's secret picker, under a shared name
+    plugin.settings.workspaces = [workspace("thirdco", { apiKeySecretName: "linear" })];
+    secrets.set("linear", "lin_api_shared");
+    group("Workspaces").onDelete?.(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(plugin.settings.workspaces).toEqual([]);
+    expect(secrets.get("linear")).toBe("lin_api_shared");
     unload(plugin);
   });
 
@@ -110,9 +126,16 @@ describe("FlowLinearSettingTab", () => {
 
     await setting.buttons[0].click();
     expect(Modal.opened[0]).toBeInstanceOf(ApiKeyModal);
+    secrets.set("linear-testco", "lin_api_shared");
+    const save = jest.spyOn(plugin, "saveSettings");
     await (Modal.opened[0] as unknown as ModalWithDeps).deps.onSave("lin_api_replaced");
 
-    expect(secrets.get("linear-testco")).toBe("lin_api_replaced");
+    // Stored under the plugin's own name, and the workspace switched to it; the secret the
+    // workspace named before, which may be shared, is untouched
+    expect(secrets.get("flow-linear-testco")).toBe("lin_api_replaced");
+    expect(plugin.settings.workspaces[0].apiKeySecretName).toBe("flow-linear-testco");
+    expect(secrets.get("linear-testco")).toBe("lin_api_shared");
+    expect(save).toHaveBeenCalled();
     unload(plugin);
   });
 

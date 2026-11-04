@@ -4,7 +4,12 @@
 import { App, PluginSettingTab, SettingDefinitionItem } from "obsidian";
 import type FlowLinearPlugin from "./main";
 import { notVisibleMessage, WorkspaceStatus } from "./completion";
-import { clampInterval, MIN_CHECK_INTERVAL_MINUTES, WorkspaceSettings } from "./settings";
+import {
+  clampInterval,
+  MIN_CHECK_INTERVAL_MINUTES,
+  secretNameFor,
+  WorkspaceSettings,
+} from "./settings";
 import { ApiKeyModal, WorkspaceModal } from "./workspace-modal";
 
 export const OLD_FLOW_WARNING =
@@ -107,7 +112,11 @@ export class FlowLinearSettingTab extends PluginSettingTab {
   // Reads the list at the time of the click, not when the tab was drawn
   private async deleteWorkspace(index: number): Promise<void> {
     const [removed] = this.plugin.settings.workspaces.splice(index, 1);
-    if (removed) this.plugin.clearSecret(removed.apiKeySecretName);
+    // A workspace set up with Obsidian's secret picker may name a secret other plugins share,
+    // so only a secret this plugin named itself is cleared
+    if (removed && removed.apiKeySecretName === secretNameFor(removed.urlKey)) {
+      this.plugin.clearSecret(removed.apiKeySecretName);
+    }
     await this.plugin.saveSettings();
     this.update();
   }
@@ -138,7 +147,11 @@ export class FlowLinearSettingTab extends PluginSettingTab {
       workspace,
       createClient: (apiKey) => this.plugin.createClient(apiKey),
       onSave: async (apiKey) => {
-        this.plugin.storeSecret(workspace.apiKeySecretName, apiKey);
+        // Always the plugin's own name, never a secret picked earlier that others may share
+        const name = secretNameFor(workspace.urlKey);
+        this.plugin.storeSecret(name, apiKey);
+        workspace.apiKeySecretName = name;
+        await this.plugin.saveSettings();
         this.update();
         this.plugin.requestCheck();
       },

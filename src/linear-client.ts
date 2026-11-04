@@ -2,12 +2,13 @@
 // ABOUTME: Read-only; maps HTTP and GraphQL failures onto a few error kinds the plugin can act on.
 
 import { requestUrl } from "obsidian";
-import { splitIdentifier } from "./ticket-url";
 
 export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 export const REQUEST_TIMEOUT_MS = 30_000;
-// Tickets asked for in one query when checking states
+// Tickets asked for in one request when checking states
 export const BATCH_SIZE = 50;
+// Linear identifiers: an upper-case team key, a dash and a number
+const IDENTIFIER = /^[A-Z][A-Z0-9]*-\d+$/;
 
 export interface LinearTicket {
   id: string; // UUID
@@ -41,17 +42,29 @@ export interface LinearWorkspaceClient {
   getOrganization(): Promise<LinearOrganization>;
   // Accepts an identifier the ticket had before it moved team; null if there's no such ticket
   getTicketByIdentifier(identifier: string): Promise<LinearTicket | null>;
-  // Each identifier asked for → its ticket, or null if Linear has no such ticket
+  // Each well-formed identifier asked for → its ticket, or null if Linear says it can't find
+  // one (no such ticket, or the key can't see it). Malformed identifiers are left out.
   getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>>;
 }
 
 const TICKET_FIELDS = `id identifier url title trashed state { type } project { name }`;
 
-/** Every query the plugin sends. scripts/probe-linear.mjs sends the same ones. */
+/**
+ * Every query the plugin sends. scripts/probe-linear.mjs builds the same ones, which
+ * tests/probe-linear.test.ts checks.
+ */
 export const QUERIES = {
   organization: `query { viewer { organization { name urlKey } } }`,
-  issue: `query ($id: String!) { issue(id: $id) { ${TICKET_FIELDS} } }`,
-  issues: `query ($filter: IssueFilter, $after: String) { issues(filter: $filter, first: ${BATCH_SIZE}, after: $after, includeArchived: true) { nodes { ${TICKET_FIELDS} } pageInfo { hasNextPage endCursor } } }`,
+  // One aliased issue(id:) per ticket, t0…tN, with the identifiers passed as $i0…$iN.
+  // issue(id:) also accepts the identifier a ticket had before it moved team.
+  tickets(count: number): string {
+    const indexes = Array.from({ length: count }, (_, index) => index);
+    const variables = indexes.map((index) => `$i${index}: String!`).join(", ");
+    const fields = indexes
+      .map((index) => `t${index}: issue(id: $i${index}) { ${TICKET_FIELDS} }`)
+      .join(" ");
+    return `query (${variables}) { ${fields} }`;
+  },
 };
 
 interface TicketNode {
@@ -64,15 +77,9 @@ interface TicketNode {
   project?: { name: string } | null;
 }
 
-interface IssuePage {
-  issues: {
-    nodes: TicketNode[];
-    pageInfo: { hasNextPage: boolean; endCursor: string | null };
-  };
-}
-
 interface GraphqlError {
   message?: string;
+  path?: (string | number)[];
   extensions?: { code?: string; type?: string; userPresentableMessage?: string };
 }
 
@@ -89,10 +96,8 @@ function toTicket(node: TicketNode): LinearTicket {
   };
 }
 
-function isNotFound(error: unknown): boolean {
-  return (
-    error instanceof LinearError && error.kind === "api" && /entity not found/i.test(error.message)
-  );
+function isNotFound(error: GraphqlError): boolean {
+  return /entity not found/i.test(error.message ?? "");
 }
 
 function errorFromGraphql(errors: GraphqlError[]): LinearError {
@@ -133,58 +138,59 @@ export class LinearClient implements LinearWorkspaceClient {
   }
 
   async getTicketByIdentifier(identifier: string): Promise<LinearTicket | null> {
-    try {
-      const data = await this.query<{ issue: TicketNode | null }>(QUERIES.issue, {
-        id: identifier,
-      });
-      return data.issue ? toTicket(data.issue) : null;
-    } catch (error) {
-      if (isNotFound(error)) return null;
-      throw error;
-    }
+    return (await this.getTickets([identifier])).get(identifier) ?? null;
   }
 
-  /**
-   * Looks tickets up by team key and number, BATCH_SIZE at a time. One that doesn't turn up
-   * that way (it may have moved team) is looked up on its own by identifier.
-   */
   async getTickets(identifiers: string[]): Promise<Map<string, LinearTicket | null>> {
-    const unique = [...new Set(identifiers)];
-    const found = new Map<string, LinearTicket>();
-    for (let start = 0; start < unique.length; start += BATCH_SIZE) {
-      const conditions = unique.slice(start, start + BATCH_SIZE).flatMap((identifier) => {
-        const parts = splitIdentifier(identifier);
-        return parts
-          ? [{ team: { key: { eq: parts.teamKey } }, number: { eq: parts.number } }]
-          : [];
-      });
-      if (conditions.length === 0) continue;
-      for (const ticket of await this.queryIssues({ or: conditions })) {
-        found.set(ticket.identifier, ticket);
-      }
-    }
+    const unique = [...new Set(identifiers)].filter((identifier) => IDENTIFIER.test(identifier));
     const results = new Map<string, LinearTicket | null>();
-    for (const identifier of unique) {
-      results.set(
-        identifier,
-        found.get(identifier) ?? (await this.getTicketByIdentifier(identifier))
+    for (let start = 0; start < unique.length; start += BATCH_SIZE) {
+      const batch = unique.slice(start, start + BATCH_SIZE);
+      const variables = Object.fromEntries(
+        batch.map((identifier, index) => [`i${index}`, identifier])
       );
+      const { data, errors } = await this.request<Record<string, TicketNode | null>>(
+        QUERIES.tickets(batch.length),
+        variables
+      );
+
+      // Each "not found" names its alias in its path. Anything else fails the whole check.
+      const notFound = new Set<string>();
+      const otherErrors = errors.filter((error) => {
+        const alias = error.path?.[0];
+        if (typeof alias === "string" && isNotFound(error)) {
+          notFound.add(alias);
+          return false;
+        }
+        return true;
+      });
+      if (otherErrors.length > 0) throw errorFromGraphql(otherErrors);
+
+      batch.forEach((identifier, index) => {
+        const node = data?.[`t${index}`];
+        if (node) results.set(identifier, toTicket(node));
+        else if (notFound.has(`t${index}`)) results.set(identifier, null);
+        else throw new LinearError("api", `Linear gave no answer for ${identifier}`);
+      });
     }
     return results;
   }
 
-  private async queryIssues(filter: object): Promise<LinearTicket[]> {
-    const tickets: LinearTicket[] = [];
-    let after: string | null = null;
-    do {
-      const data: IssuePage = await this.query<IssuePage>(QUERIES.issues, { filter, after });
-      tickets.push(...data.issues.nodes.map(toTicket));
-      after = data.issues.pageInfo.hasNextPage ? data.issues.pageInfo.endCursor : null;
-    } while (after);
-    return tickets;
+  private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    const { data, errors } = await this.request<T>(query, variables);
+    if (errors.length > 0) throw errorFromGraphql(errors);
+    if (!data) throw new LinearError("api", "Linear returned no data");
+    return data;
   }
 
-  private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+  /**
+   * Send a query and return its data and errors, which can both be present: Linear answers a
+   * partly failed query with HTTP 200, the data it could get and an error for each part.
+   */
+  private async request<T>(
+    query: string,
+    variables: Record<string, unknown>
+  ): Promise<{ data: T | null; errors: GraphqlError[] }> {
     let response;
     try {
       response = await withTimeout(
@@ -209,12 +215,18 @@ export class LinearClient implements LinearWorkspaceClient {
     if (response.status === 429) {
       throw new LinearError("rate-limit", "Linear's rate limit was reached");
     }
-    if (body?.errors && body.errors.length > 0) {
-      throw errorFromGraphql(body.errors);
+    const errors = body?.errors ?? [];
+    // Authentication and rate limits fail every part, so they fail the whole request
+    if (
+      errors.some((error) =>
+        ["AUTHENTICATION_ERROR", "RATELIMITED"].includes(error.extensions?.code ?? "")
+      )
+    ) {
+      throw errorFromGraphql(errors);
     }
-    if (response.status >= 400 || !body?.data) {
+    if (!body || (response.status >= 400 && errors.length === 0)) {
       throw new LinearError("api", `Linear returned HTTP ${response.status}`);
     }
-    return body.data;
+    return { data: body.data ?? null, errors };
   }
 }

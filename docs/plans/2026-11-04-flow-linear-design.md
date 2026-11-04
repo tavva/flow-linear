@@ -58,12 +58,18 @@ The settings tab is declarative (`getSettingDefinitions()`, Obsidian 1.13), so
     item's `sourceLabel` (the chip in Focus and the heading on the TV board).
   - _Default sphere_: a dropdown of Flow's spheres (`getSpheres()`).
   - Each row shows its display name and `urlKey`, and a "Change key" button
-    that opens the same password field, checks the new key belongs to the
-    same workspace, and stores it under the workspace's secret name. It's
-    also how a key is entered on another device, where the workspace arrives
-    through synced settings without one.
+    that opens the same password field and checks the new key belongs to the
+    same workspace. It always stores the key under the plugin's own name,
+    `flow-linear-<urlKey>`, and switches the workspace to that name, so a
+    secret picked with Obsidian's secret picker in an earlier build (which
+    other plugins may share) is never overwritten. It's also how a key is
+    entered on another device, where the workspace arrives through synced
+    settings without one.
   - Rows can be deleted. SecretStorage has no delete, so deleting a workspace
-    overwrites its secret with an empty value, which reads as no key.
+    overwrites its secret with an empty value, which reads as no key. Only a
+    secret the plugin named itself is cleared. Whether Obsidian accepts an
+    empty value is to be checked by hand; if `setSecret` throws, the error is
+    logged and the workspace is still removed.
 - **Check every**: minutes between checks, default 5, minimum 1.
 - **Status**: a read-only row per workspace with the last successful check
   time or the last error.
@@ -147,10 +153,19 @@ Per workspace with a key on this device:
    only the secret, so another device's secret of that name may hold a key
    for a different workspace. If the `urlKey` doesn't match, set a status
    error, show one notice, and skip the workspace.
-4. Fetch the tickets' states, 50 at a time, with `issues(filter: { or: [{
-   team: { key }, number }] }, includeArchived: true)`. An identifier that
-   doesn't come back that way (the ticket may have moved team) is looked up
-   on its own with `issue(id:)`.
+4. Fetch the tickets, 50 to a request, with one aliased `issue(id:)` per
+   ticket: `query ($i0: String!, …) { t0: issue(id: $i0) { … } t1: … }`.
+   Identifiers go in as variables, and only ones matching
+   `/^[A-Z][A-Z0-9]*-\d+$/` are asked for. `issue(id:)` accepts the identifier
+   a ticket had before it moved team, and returns trashed tickets with
+   `trashed: true`. A missing ticket comes back as HTTP 200 with that alias
+   null and an error whose `path[0]` names the alias, message "Entity not
+   found: Issue", code `INPUT_ERROR`; that alias counts as not visible. Any
+   other error, an error without a path, or an alias that is null with no
+   error fails the whole check. (An `issues(filter: { or: [{ team: { key },
+   number }] })` batch was tried first: Linear ignores those conditions and
+   returns unrelated issues.) A ticket in a team the key can't see wasn't
+   probed; it's assumed to give the same not-found error.
 5. For each ticket whose state type is `completed` or `canceled`, or which is
    trashed, call `completeFocusItem` on each of its unfinished items. A
    trashed ticket is logged with `console.warn` once its item is completed.
@@ -165,20 +180,25 @@ Per workspace with a key on this device:
    renamed) gets its items relinked with `updateFocusItem(id, { url,
    externalId })`, so later checks look it up by its current identifier, the
    chip shows it, and a team key reused later can't match a different ticket.
-   Flow builds from before `externalId` could be changed ignore that field and
-   update only the link, which is what checks read. The first lookup of a
-   moved ticket still goes by its old team key and number, so a team key
-   reused before that lookup could match a different ticket; that's accepted
+   An item whose `externalId` differs from the ticket's identifier gets it
+   corrected even if its link is current. Flow builds from before
+   `externalId` could be changed ignore that field and update only the link,
+   which is what checks read. The first lookup of a moved ticket still goes
+   by its old identifier, so if Linear later gives that identifier to another
+   ticket before the lookup, it could match the wrong one; that's accepted
    rather than storing ticket UUIDs.
 8. An open ticket whose project differs from its items' `projectName` (it
    joined, changed or left a project) gets them updated with `projectName`
    set to the new name, or null to clear it. A move and a project change go
-   in one `updateFocusItem` call. After the first project update the checker
-   reads the item back; if Flow didn't keep the name (a build from before
-   `projectName`), it stops sending project names for the session, so an
-   older Flow isn't rewritten on every check.
+   in one `updateFocusItem` call.
+9. Older Flow builds drop `externalId` and `projectName` changes without an
+   error, so every check would see a mismatch and rewrite the item. After
+   each update with either field the checker reads the item back. Two
+   updates in a row that don't keep a field (one could be a sync overwriting
+   the item) and the checker stops sending that field. The count resets when
+   Flow reconnects with a new API object, as after an upgrade.
 
-A pure function, `planCompletionCheck(itemsByIdentifier, tickets)`, decides
+A pure function, `planCompletionCheck(itemsByIdentifier, tickets, dropped)`, decides
 what to complete and update and what isn't visible; the `CompletionChecker`
 does the reading and writing, and stops between items if Flow unloads.
 
@@ -357,8 +377,10 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
 - **URL parsing**: valid forms (with and without slug, query, fragment) and
   rejects (other hosts, project or team URLs, missing identifier).
 - **Linear client**: GraphQL responses stored as JSON in `tests/fixtures/`,
-  served through the `requestUrl` mock. Covers batching, pagination, the
-  one-by-one lookup for moved and missing tickets, "Entity not found", 401,
+  served through the `requestUrl` mock, in the shape the probe recorded from
+  a real workspace. Covers the aliased lookup and its batches, partial
+  answers (one alias not found, HTTP 200), moved and trashed tickets, other
+  errors failing the lookup, malformed identifiers, 401,
   429, a GraphQL `errors` array, the 30-second timeout, and that no request
   is a mutation. The tests check the client's parsing and error mapping, not
   the mock.
@@ -379,10 +401,11 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
   team, add tickets by link, complete and cancel them in Linear, delete one,
   go offline and come back.
 
-Fixtures are to be recorded once by hand from a real workspace, with names and
-URLs replaced by test values. The first set was written by hand in Linear's
-response shape, since no workspace was available while building; replace them
-with recorded ones during the manual check.
+The ticket lookup fixtures follow the responses `scripts/probe-linear.mjs`
+recorded from the Acme workspace with a Read-only key (HTTP 200 partial
+answers, `INPUT_ERROR` not-found, trashed and moved tickets), with names,
+IDs and URLs replaced by test values. The probe sends exactly the plugin's
+queries, which `tests/probe-linear.test.ts` checks.
 
 ## Decisions (Ben, 2026-11-04)
 

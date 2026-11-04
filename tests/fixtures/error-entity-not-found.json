@@ -2,12 +2,16 @@
   "errors": [
     {
       "message": "Entity not found: Issue",
+      "path": ["t0"],
+      "locations": [{ "line": 1, "column": 24 }],
       "extensions": {
         "type": "invalid input",
-        "code": "INVALID_INPUT",
+        "code": "INPUT_ERROR",
+        "statusCode": 400,
+        "userError": true,
         "userPresentableMessage": "Could not find referenced Issue."
       }
     }
   ],
-  "data": null
+  "data": { "t0": null }
 }

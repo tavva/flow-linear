@@ -6,21 +6,25 @@
 //     --exists ABC-1 --missing ABC-99999 --trashed ABC-2 --moved OLD-3 [--hidden SEC-4]
 //
 // Each flag names a ticket identifier; give any of them. The key is read from the environment
-// and never printed.
+// and never printed. `--print-queries <count>` prints the queries without sending anything.
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 
-// The same strings as QUERIES in src/linear-client.ts; tests/probe-linear.test.ts checks this
+// Built the same way as QUERIES in src/linear-client.ts; tests/probe-linear.test.ts checks this
+const TICKET_FIELDS = "id identifier url title trashed state { type } project { name }";
 const QUERIES = {
   organization: "query { viewer { organization { name urlKey } } }",
-  issue:
-    "query ($id: String!) { issue(id: $id) { id identifier url title trashed state { type } project { name } } }",
-  issues:
-    "query ($filter: IssueFilter, $after: String) { issues(filter: $filter, first: 50, after: $after, includeArchived: true) { nodes { id identifier url title trashed state { type } project { name } } pageInfo { hasNextPage endCursor } } }",
+  tickets(count) {
+    const indexes = Array.from({ length: count }, (_, index) => index);
+    const variables = indexes.map((index) => `$i${index}: String!`).join(", ");
+    const fields = indexes
+      .map((index) => `t${index}: issue(id: $i${index}) { ${TICKET_FIELDS} }`)
+      .join(" ");
+    return `query (${variables}) { ${fields} }`;
+  },
 };
 
 const ROLES = ["exists", "missing", "trashed", "moved", "hidden"];
-const IDENTIFIER = /^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/;
 
 function parseArgs(argv) {
   const tickets = [];
@@ -74,42 +78,43 @@ function report(title, { status, body, text }, data) {
   }
   for (const error of body.errors ?? []) {
     console.log(
-      `error: message=${JSON.stringify(error.message)} code=${JSON.stringify(error.extensions?.code)} type=${JSON.stringify(error.extensions?.type)} userPresentableMessage=${JSON.stringify(error.extensions?.userPresentableMessage)}`
+      `error: path=${JSON.stringify(error.path)} message=${JSON.stringify(error.message)} code=${JSON.stringify(error.extensions?.code)} type=${JSON.stringify(error.extensions?.type)} userPresentableMessage=${JSON.stringify(error.extensions?.userPresentableMessage)}`
     );
   }
   if (data !== undefined) console.log(JSON.stringify(data, null, 2));
 }
 
 async function main() {
+  const args = process.argv.slice(2);
+  if (args[0] === "--print-queries") {
+    const count = Number(args[1] ?? 1);
+    console.log(
+      JSON.stringify({ organization: QUERIES.organization, tickets: QUERIES.tickets(count) })
+    );
+    return;
+  }
+
   const apiKey = process.env.LINEAR_API_KEY;
   if (!apiKey) throw new Error("Set LINEAR_API_KEY in the environment");
-  const tickets = parseArgs(process.argv.slice(2));
+  const tickets = parseArgs(args);
 
   const organization = await send(apiKey, QUERIES.organization, {});
   report("viewer organization", organization, organization.body?.data?.viewer?.organization);
 
-  const conditions = tickets.flatMap(({ identifier }) => {
-    const match = IDENTIFIER.exec(identifier);
-    return match ? [{ team: { key: { eq: match[1] } }, number: { eq: Number(match[2]) } }] : [];
-  });
-  const batch = await send(apiKey, QUERIES.issues, { filter: { or: conditions }, after: null });
-  const nodes = batch.body?.data?.issues?.nodes ?? [];
-  report("batch: issues(filter: { or: [team key + number] }, includeArchived: true)", batch, {
-    returned: nodes.map(describeTicket),
-    notReturned: tickets
-      .filter(({ identifier }) => !nodes.some((node) => node.identifier === identifier))
-      .map(({ role, identifier }) => `${role} ${identifier}`),
-    hasNextPage: batch.body?.data?.issues?.pageInfo?.hasNextPage,
-  });
-
-  for (const { role, identifier } of tickets) {
-    const single = await send(apiKey, QUERIES.issue, { id: identifier });
-    report(
-      `issue(id: "${identifier}")  [${role}]`,
-      single,
-      describeTicket(single.body?.data?.issue)
-    );
-  }
+  const variables = Object.fromEntries(
+    tickets.map(({ identifier }, index) => [`i${index}`, identifier])
+  );
+  const answer = await send(apiKey, QUERIES.tickets(tickets.length), variables);
+  report(
+    "tickets: one aliased issue(id:) per identifier",
+    answer,
+    Object.fromEntries(
+      tickets.map(({ role, identifier }, index) => [
+        `t${index} ${role} ${identifier}`,
+        describeTicket(answer.body?.data?.[`t${index}`] ?? null),
+      ])
+    )
+  );
 }
 
 main().catch((error) => {

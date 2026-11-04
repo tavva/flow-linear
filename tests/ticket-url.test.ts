@@ -1,7 +1,7 @@
 // ABOUTME: Tests parsing Linear ticket URLs into workspace and identifier.
 // ABOUTME: Covers accepted forms and the links that must be refused.
 
-import { parseTicketUrl, splitIdentifier } from "../src/ticket-url";
+import { parseTicketUrl } from "../src/ticket-url";
 
 describe("parseTicketUrl", () => {
   it.each([
@@ -29,16 +29,5 @@ describe("parseTicketUrl", () => {
     ["an empty string", ""],
   ])("refuses %s", (_, url) => {
     expect(parseTicketUrl(url)).toBeNull();
-  });
-});
-
-describe("splitIdentifier", () => {
-  it("splits team key and number", () => {
-    expect(splitIdentifier("ENG2-14")).toEqual({ teamKey: "ENG2", number: 14 });
-  });
-
-  it("refuses malformed identifiers", () => {
-    expect(splitIdentifier("ENG")).toBeNull();
-    expect(splitIdentifier("-3")).toBeNull();
   });
 });

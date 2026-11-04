@@ -3,6 +3,7 @@
 
 import {
   CompletionChecker,
+  MISSES_BEFORE_DROPPING,
   NO_KEY_STATUS,
   planCompletionCheck,
   unfinishedItemsByIdentifier,
@@ -156,7 +157,9 @@ describe("planCompletionCheck", () => {
     const named = focusItem("TST-1", { external: { ...item.external, projectName: "Launch" } });
     const tickets = new Map([["TST-1", ticket("TST-1", { projectName: "Launch" })]]);
     expect(planCompletionCheck(new Map([["TST-1", [named]]]), tickets).update).toEqual([]);
-    expect(planCompletionCheck(items, tickets, { projectNames: false }).update).toEqual([]);
+    expect(planCompletionCheck(items, tickets, new Set(["projectName"] as const)).update).toEqual(
+      []
+    );
   });
 
   it("sends a move and a project change as one update", () => {
@@ -305,6 +308,11 @@ describe("CompletionChecker", () => {
     const lookUp = jest.spyOn(d.testco, "getTickets");
     await d.check();
     expect(lookUp).toHaveBeenCalledWith(["NEW-7"]);
+
+    // The stale identifier is tried twice in all, then left alone
+    await d.check();
+    await d.check();
+    expect(d.focus.writes).toHaveLength(MISSES_BEFORE_DROPPING);
   });
 
   it("keeps each item's project name in step with its ticket", async () => {
@@ -342,9 +350,68 @@ describe("CompletionChecker", () => {
     await d.check();
     await d.check();
 
-    // One attempt, then no more writes every check
-    expect(d.focus.writes).toHaveLength(1);
+    // Two misses in a row, then no more writes every check
+    expect(d.focus.writes).toHaveLength(MISSES_BEFORE_DROPPING);
     expect(d.checker.getStatus("testco").error).toBeUndefined();
+  });
+
+  it("doesn't stop sending a field because of one read-back a sync overwrote", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { projectName: "Launch" })];
+    d.focus.items = [focusItem("TST-1")];
+    const update = d.focus.updateFocusItem.bind(d.focus);
+    let updates = 0;
+    d.focus.updateFocusItem = async (id, changes) => {
+      await update(id, changes);
+      // The first time, another device's sync overwrites the item straight after the write
+      if (++updates === 1) {
+        d.focus.items[0] = { ...d.focus.items[0], external: { ...d.focus.items[0].external } };
+        delete d.focus.items[0].external.projectName;
+      }
+    };
+
+    await d.check();
+    await d.check();
+
+    expect(d.focus.items[0].external.projectName).toBe("Launch");
+    // Kept on the second try, so the miss count went back to nothing
+    d.testco.tickets[0].projectName = "Relaunch";
+    await d.check();
+    expect(d.focus.items[0].external.projectName).toBe("Relaunch");
+  });
+
+  it("tries a dropped field again once Flow reconnects, as after an upgrade", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1", { projectName: "Launch" })];
+    d.focus.items = [focusItem("TST-1")];
+    const update = d.focus.updateFocusItem.bind(d.focus);
+    d.focus.updateFocusItem = (id, { text, sphere, sourceLabel, url, externalId }) =>
+      update(id, { text, sphere, sourceLabel, url, externalId });
+    for (let i = 0; i < 3; i++) await d.check();
+    const writes = d.focus.writes.length;
+
+    // Flow is upgraded and reloaded: a new API object that keeps project names
+    const upgraded = new FocusStore();
+    upgraded.items = d.focus.items;
+    d.focus = upgraded;
+    d.flow = upgraded;
+    await d.check();
+
+    expect(writes).toBe(MISSES_BEFORE_DROPPING);
+    expect(upgraded.items[0].external.projectName).toBe("Launch");
+  });
+
+  it("fixes an item whose identifier is out of date even when its link is current", async () => {
+    const d = new Device();
+    d.testco.tickets = [ticket("TST-1")];
+    const item = focusItem("TST-1");
+    item.external.externalId = "OLD-3";
+    d.focus.items = [item];
+
+    await d.check();
+
+    expect(d.focus.items[0].external.externalId).toBe("TST-1");
+    expect(d.focus.items[0].external.url).toBe(item.external.url);
   });
 
   it("asks Linear nothing when there are no unfinished linked items", async () => {

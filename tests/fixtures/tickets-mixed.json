@@ -1,0 +1,46 @@
+{
+  "errors": [
+    {
+      "message": "Entity not found: Issue",
+      "path": ["t1"],
+      "locations": [{ "line": 1, "column": 120 }],
+      "extensions": {
+        "type": "invalid input",
+        "code": "INPUT_ERROR",
+        "statusCode": 400,
+        "userError": true,
+        "userPresentableMessage": "Could not find referenced Issue."
+      }
+    }
+  ],
+  "data": {
+    "t0": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000001",
+      "identifier": "TST-1",
+      "url": "https://linear.app/testco/issue/TST-1/write-the-onboarding-guide",
+      "title": "Write the onboarding guide",
+      "trashed": false,
+      "state": { "type": "started" },
+      "project": { "name": "Onboarding" }
+    },
+    "t1": null,
+    "t2": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000003",
+      "identifier": "TST-3",
+      "url": "https://linear.app/testco/issue/TST-3/old-ticket",
+      "title": "Old ticket",
+      "trashed": true,
+      "state": { "type": "unstarted" },
+      "project": null
+    },
+    "t3": {
+      "id": "0b5c3e0a-1111-4c55-9a1e-000000000004",
+      "identifier": "TST-1131",
+      "url": "https://linear.app/testco/issue/TST-1131/moved-ticket",
+      "title": "Moved ticket",
+      "trashed": false,
+      "state": { "type": "completed" },
+      "project": null
+    }
+  }
+}

@@ -1,5 +1,5 @@
 // ABOUTME: Parses Linear ticket URLs into workspace and identifier.
-// ABOUTME: Also splits identifiers such as "ABC-123" into team key and number.
+// ABOUTME: Accepts links with or without a title slug, query string or fragment.
 
 export interface TicketRef {
   urlKey: string;
@@ -27,14 +27,4 @@ export function parseTicketUrl(input: string): TicketRef | null {
   const [urlKey, , identifier] = parts;
   if (!IDENTIFIER_PATTERN.test(identifier)) return null;
   return { urlKey: urlKey.toLowerCase(), identifier: identifier.toUpperCase() };
-}
-
-/** Split an identifier such as "ABC-123" into its team key and number. */
-export function splitIdentifier(identifier: string): { teamKey: string; number: number } | null {
-  if (!IDENTIFIER_PATTERN.test(identifier)) return null;
-  const dash = identifier.lastIndexOf("-");
-  return {
-    teamKey: identifier.slice(0, dash).toUpperCase(),
-    number: Number(identifier.slice(dash + 1)),
-  };
 }

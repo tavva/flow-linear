@@ -10,6 +10,7 @@ import {
   LinearClient,
   BATCH_SIZE,
   LinearError,
+  QUERIES,
   REQUEST_TIMEOUT_MS,
 } from "../src/linear-client";
 
@@ -95,21 +96,21 @@ describe("getTicketByIdentifier", () => {
       trashed: false,
       projectName: "Login revamp",
     });
-    expect(sentBody(0).query).toContain("issue(id: $id)");
-    expect(sentBody(0).variables).toEqual({ id: "OLD-2" });
+    expect(sentBody(0).query).toBe(QUERIES.tickets(1));
+    expect(sentBody(0).variables).toEqual({ i0: "OLD-2" });
   });
 
-  it("returns null when Linear says there's no such ticket", async () => {
-    serve([400, "error-entity-not-found"]);
+  it("returns null when Linear says there's no such ticket, with HTTP 200 as Linear does", async () => {
+    serve([200, "error-entity-not-found"]);
     await expect(client.getTicketByIdentifier("TST-99")).resolves.toBeNull();
   });
 
   it("trims the project name, as Flow does, and treats a blank one as none", async () => {
     const issue = JSON.parse(fixture("issue-found"));
-    issue.data.issue.project = { name: "  Launch " };
+    issue.data.t0.project = { name: "  Launch " };
     serve([200, JSON.stringify(issue)]);
     expect((await client.getTicketByIdentifier("TST-2"))?.projectName).toBe("Launch");
-    issue.data.issue.project = { name: "  " };
+    issue.data.t0.project = { name: "  " };
     serve([200, JSON.stringify(issue)]);
     expect((await client.getTicketByIdentifier("TST-2"))?.projectName).toBeNull();
   });
@@ -118,96 +119,112 @@ describe("getTicketByIdentifier", () => {
     serve([400, "error-invalid-input"]);
     expect((await linearError(client.getTicketByIdentifier("TST-1"))).kind).toBe("api");
   });
+
+  it("asks nothing for a malformed identifier", async () => {
+    await expect(client.getTicketByIdentifier("not-an-id")).resolves.toBeNull();
+    expect(mockRequestUrl).not.toHaveBeenCalled();
+  });
 });
 
 describe("getTickets", () => {
-  it("looks tickets up in one query by team key and number", async () => {
-    serve([200, "issues-batch"], [400, "error-entity-not-found"]);
-    const tickets = await client.getTickets(["TST-1", "TST-3", "TST-1", "TST-9"]);
+  it("looks every ticket up in one request, one alias each, with the identifiers as variables", async () => {
+    serve([200, "tickets-mixed"]);
+    const tickets = await client.getTickets(["TST-1", "TST-99", "TST-3", "OLD-7", "TST-1"]);
 
-    expect(sentBody(0).variables).toEqual({
-      filter: {
-        or: [
-          { team: { key: { eq: "TST" } }, number: { eq: 1 } },
-          { team: { key: { eq: "TST" } }, number: { eq: 3 } },
-          { team: { key: { eq: "TST" } }, number: { eq: 9 } },
-        ],
-      },
-      after: null,
-    });
-    expect(sentBody(0).query).toContain("includeArchived: true");
-    expect([...tickets.keys()]).toEqual(["TST-1", "TST-3", "TST-9"]);
-    expect(tickets.get("TST-1")?.stateType).toBe("completed");
+    expect(mockRequestUrl).toHaveBeenCalledTimes(1);
+    expect(sentBody(0).query).toBe(QUERIES.tickets(4));
+    expect(sentBody(0).variables).toEqual({ i0: "TST-1", i1: "TST-99", i2: "TST-3", i3: "OLD-7" });
+
+    expect([...tickets.keys()]).toEqual(["TST-1", "TST-99", "TST-3", "OLD-7"]);
+    expect(tickets.get("TST-1")).toMatchObject({ stateType: "started", projectName: "Onboarding" });
+    // Not found: the one error names its alias in its path
+    expect(tickets.get("TST-99")).toBeNull();
     expect(tickets.get("TST-3")?.trashed).toBe(true);
-    // A ticket with no project, and one whose response leaves the field out
-    expect(tickets.get("TST-1")?.projectName).toBeNull();
-    expect(tickets.get("TST-3")?.projectName).toBeNull();
-    expect(sentBody(0).query).toContain("project { name }");
-    // Missing from the batch, then not found on its own either
-    expect(sentBody(1).variables).toEqual({ id: "TST-9" });
-    expect(tickets.get("TST-9")).toBeNull();
+    // A moved ticket comes back under its new identifier
+    expect(tickets.get("OLD-7")).toMatchObject({ identifier: "TST-1131", stateType: "completed" });
   });
 
-  it("finds a ticket that moved team by looking its old identifier up on its own", async () => {
-    serve([200, "no-issues"], [200, "issue-found"]);
-    const tickets = await client.getTickets(["OLD-2"]);
-    expect(tickets.get("OLD-2")?.identifier).toBe("TST-2");
+  it("builds a query with one aliased issue(id:) per ticket", () => {
+    expect(QUERIES.tickets(2)).toBe(
+      "query ($i0: String!, $i1: String!) { " +
+        "t0: issue(id: $i0) { id identifier url title trashed state { type } project { name } } " +
+        "t1: issue(id: $i1) { id identifier url title trashed state { type } project { name } } }"
+    );
   });
 
-  it("follows pagination", async () => {
-    serve([200, "issues-page-1"], [200, "issues-page-2"]);
-    const tickets = await client.getTickets(["TST-1", "TST-2"]);
-    expect(sentBody(1).variables.after).toBe("cursor-1");
-    expect(tickets.get("TST-2")?.title).toBe("Fix the login page");
-  });
-
-  it("asks in batches", async () => {
+  it("asks in batches of BATCH_SIZE", async () => {
     const identifiers = Array.from({ length: BATCH_SIZE + 1 }, (_, i) => `TST-${i + 1}`);
     mockRequestUrl.mockImplementation(async (request) => {
-      const { variables } = JSON.parse(request.body as string);
-      const nodes = (variables.filter.or as { number: { eq: number } }[]).map(({ number }) => ({
-        id: `id-${number.eq}`,
-        identifier: `TST-${number.eq}`,
-        url: `https://linear.app/testco/issue/TST-${number.eq}`,
-        title: "T",
-        state: { type: "started" },
-      }));
-      return respond(
-        200,
-        JSON.stringify({ data: { issues: { nodes, pageInfo: { hasNextPage: false } } } })
+      const { variables } = JSON.parse(request.body as string) as {
+        variables: Record<string, string>;
+      };
+      const data = Object.fromEntries(
+        Object.entries(variables).map(([name, identifier]) => [
+          `t${name.slice(1)}`,
+          {
+            id: `id-${identifier}`,
+            identifier,
+            url: `https://linear.app/testco/issue/${identifier}`,
+            title: "T",
+            state: { type: "started" },
+          },
+        ])
       );
+      return respond(200, JSON.stringify({ data }));
     });
 
     const tickets = await client.getTickets(identifiers);
 
     expect(mockRequestUrl).toHaveBeenCalledTimes(2);
     expect(tickets.size).toBe(BATCH_SIZE + 1);
+    expect(tickets.get(`TST-${BATCH_SIZE + 1}`)?.identifier).toBe(`TST-${BATCH_SIZE + 1}`);
   });
 
-  it("asks for nothing when there are no identifiers", async () => {
+  it("asks nothing when there are no well-formed identifiers", async () => {
     await expect(client.getTickets([])).resolves.toEqual(new Map());
+    // Lower case, no number, or not an identifier at all
+    await expect(client.getTickets(["tst-1", "TST", "TST-1 OR 1"])).resolves.toEqual(new Map());
     expect(mockRequestUrl).not.toHaveBeenCalled();
   });
 
-  it("looks a malformed identifier up on its own", async () => {
-    serve([400, "error-entity-not-found"]);
-    const tickets = await client.getTickets(["nonsense"]);
-    expect(tickets.get("nonsense")).toBeNull();
-    expect(mockRequestUrl).toHaveBeenCalledTimes(1);
+  it("fails the whole lookup on an error that isn't a ticket's not-found", async () => {
+    const answer = JSON.parse(fixture("tickets-mixed"));
+    answer.errors[0].message = "Something else went wrong";
+    serve([200, JSON.stringify(answer)]);
+    const error = await linearError(client.getTickets(["TST-1", "TST-99", "TST-3", "OLD-7"]));
+    expect(error.kind).toBe("api");
+    expect(error.message).toBe("Something else went wrong");
+  });
+
+  it("fails the whole lookup on an error without a path", async () => {
+    const answer = JSON.parse(fixture("tickets-mixed"));
+    delete answer.errors[0].path;
+    serve([200, JSON.stringify(answer)]);
+    expect((await linearError(client.getTickets(["TST-1", "TST-99", "TST-3", "OLD-7"]))).kind).toBe(
+      "api"
+    );
+  });
+
+  it("fails when an alias comes back empty with no error to say why", async () => {
+    serve([200, JSON.stringify({ data: { t0: null } })]);
+    const error = await linearError(client.getTickets(["TST-1"]));
+    expect(error.message).toBe("Linear gave no answer for TST-1");
+  });
+
+  it("fails the whole lookup when the key is refused or rate-limited, whatever else came back", async () => {
+    const answer = JSON.parse(fixture("tickets-mixed"));
+    answer.errors.push({ message: "Rate limit exceeded", extensions: { code: "RATELIMITED" } });
+    serve([200, JSON.stringify(answer)]);
+    expect((await linearError(client.getTickets(["TST-1", "TST-99"]))).kind).toBe("rate-limit");
   });
 });
 
 describe("read-only", () => {
   it("sends no mutations", async () => {
-    serve(
-      [200, "viewer"],
-      [200, "issue-found"],
-      [200, "issues-batch"],
-      [400, "error-entity-not-found"]
-    );
+    serve([200, "viewer"], [200, "issue-found"], [200, "tickets-mixed"]);
     await client.getOrganization();
     await client.getTicketByIdentifier("TST-2");
-    await client.getTickets(["TST-1", "TST-9"]);
+    await client.getTickets(["TST-1", "TST-99", "TST-3", "OLD-7"]);
     for (const [request] of mockRequestUrl.mock.calls) {
       expect(JSON.parse(request.body as string).query).not.toMatch(/\bmutation\b/);
     }
