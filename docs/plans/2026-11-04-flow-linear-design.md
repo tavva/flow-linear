@@ -389,17 +389,12 @@ Different from Flow: dev dependencies pinned to exact versions (Flow uses
 Fixtures are recorded once by hand from a real workspace, with names and
 URLs replaced by test values.
 
-## Open questions
+## Decisions (Ben, 2026-11-04)
 
-1. **Whose labelled tickets?** Anyone in a workspace can add `focus` to any
-   ticket, including teammates who use the label for something of their own.
-   Options: import any labelled ticket (as designed), only tickets assigned to
-   you (`assignee: { isMe: { eq: true } }`), or use a more personal default
-   label such as `ben-focus`.
-2. **Mobile.** Secrets are stored per device. Do you want to enter keys on
-   your phone too, or only add tickets from the desktop?
-3. **Licence.** Same as Flow (GPL-3.0-or-later)?
-4. **Submit to the Community directory**, or keep it as a personal plugin
-   installed by hand (or through BRAT)? The guidelines still apply as good
-   practice, but submission decides whether the scanner and attestation work
-   is needed for the first release.
+1. **Whose labelled tickets:** import any ticket carrying the label, as
+   designed.
+2. **Mobile:** desktop only for now. Keys stay per device in SecretStorage;
+   entering them on a phone is left for later.
+3. **Licence:** GPL-3.0-or-later, as Flow.
+4. **Distribution:** submit to the Community directory, so the first release
+   must pass the automated scan and ship with artifact attestations.
