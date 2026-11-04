@@ -392,7 +392,9 @@ URLs replaced by test values.
 ## Decisions (Ben, 2026-11-04)
 
 1. **Whose labelled tickets:** import any ticket carrying the label, as
-   designed.
+   designed. Ben sets his own workspaces' label to `ben-focus`, so
+   teammates' `focus` labels aren't picked up; the plugin's default stays
+   `focus`.
 2. **Mobile:** desktop only for now. Keys stay per device in SecretStorage;
    entering them on a phone is left for later.
 3. **Licence:** GPL-3.0-or-later, as Flow.
