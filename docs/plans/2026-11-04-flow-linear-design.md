@@ -8,7 +8,7 @@ Linear unless you ask for it, in one of two ways:
 
 1. Run "Add Linear ticket to Focus", paste a ticket URL, and keep the ticket's
    title or write your own wording.
-2. Add the `focus` label to a ticket in Linear. Flow Linear picks it up on its
+2. Add the `flow-focus` label to a ticket in Linear. Flow Linear picks it up on its
    next check.
 
 The label then works both ways. It sits on a ticket exactly while at least one
@@ -47,7 +47,7 @@ The settings tab is declarative (`getSettingDefinitions()`, Obsidian 1.13), so
     item's `sourceLabel` (the chip in Focus and the heading on the TV board).
   - _Default sphere_: the sphere new items from this workspace get.
   - Each row shows its display name and `urlKey`; rows can be deleted.
-- **Label name**: one text setting for all workspaces, default `focus`.
+- **Label name**: one text setting for all workspaces, default `flow-focus`.
 - **Check every**: minutes between checks, default 5, minimum 1.
 - **Status**: a read-only row per workspace with the last successful check
   time or the last error.
@@ -392,9 +392,9 @@ URLs replaced by test values.
 ## Decisions (Ben, 2026-11-04)
 
 1. **Whose labelled tickets:** import any ticket carrying the label, as
-   designed. Ben sets his own workspaces' label to `ben-focus`, so
-   teammates' `focus` labels aren't picked up; the plugin's default stays
-   `focus`.
+   designed. The default label is `flow-focus`
+   rather than `focus`, so it doesn't collide with a team's own `focus`
+   label.
 2. **Mobile:** desktop only for now. Keys stay per device in SecretStorage;
    entering them on a phone is left for later.
 3. **Licence:** GPL-3.0-or-later, as Flow.
